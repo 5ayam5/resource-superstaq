@@ -21,7 +21,7 @@ import resource_estimation.ftqc.architecture as arch
 import resource_estimation.ftqc.compile_ftqc as comp
 import resource_estimation.ftqc.lattice_surgery_primitives as lsp
 from cirq_superstaq import Barrier
-from resource_estimation.ftqc import MovementLayout, Column, Embedded
+from resource_estimation.ftqc import Column, Embedded, MovementLayout, ReactionDepthMetricCollector
 
 
 @pytest.fixture
@@ -446,6 +446,17 @@ def test_ft_compile_replacement_metrics():
     assert metrics["idling_events"] == 0
     assert metrics["move_events"] == 0
     assert metrics["final_ops"] == len(list(result.circuit.all_operations()))
+
+
+def test_ft_compile_reaction_depth_metric_uses_layout_default_factory_specs(t_circuit):
+    result = comp.ft_compile(
+        layout=MovementLayout(t_circuit, num_t_factories=1),
+        arc=arch.DefaultMovement(idling=False, post_op_correction=False),
+        verbose=False,
+        metric_calculators={"reaction_depth": ReactionDepthMetricCollector()},
+    )
+
+    assert result.metrics["reaction_depth"] == {cirq.GridQubit(0, 1): {"X": 0, "Z": 1}}
 
 
 def test_ft_compile_pass_metrics(bell_circuit):
