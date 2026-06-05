@@ -51,5 +51,6 @@ def test_ft_compile_metric_collector_defaults():
 def test_public_compile_metric_exports():
     assert ftqc.FTCompileResult is compile_metrics.FTCompileResult
     assert ftqc.FTCompileMetricCollector is compile_metrics.FTCompileMetricCollector
+    assert ftqc.ReactionDepthMetricCollector is compile_metrics.ReactionDepthMetricCollector
     assert comp.FTCompileResult is compile_metrics.FTCompileResult
     assert comp.FTCompileMetricCollector is compile_metrics.FTCompileMetricCollector

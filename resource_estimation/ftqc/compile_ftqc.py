@@ -11,8 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from cirq.ops.raw_types import Operation
-from math import pi
+from __future__ import annotations
+
 import copy
 import os
 import sys
@@ -24,6 +24,7 @@ from warnings import warn
 
 import cirq
 import cirq_superstaq as css
+from cirq.ops.raw_types import Operation
 from cirq_superstaq import Barrier, barrier
 from tqdm import tqdm
 

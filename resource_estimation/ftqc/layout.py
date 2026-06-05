@@ -12,26 +12,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from __future__ import annotations
+
 import abc
+from collections import deque
+from dataclasses import dataclass, field
+from itertools import combinations, product
+from math import ceil, sqrt
+from typing import Literal
+
 import cirq
 import networkx as nx
 import numpy as np
-from collections import deque
-from dataclasses import dataclass
-from typing import Literal
-from math import ceil, sqrt
-from itertools import combinations, product
+
+from .factory_specs import FactorySpec, FactoryType
 
 
 @dataclass
 class Layout(abc.ABC):
     """
-    Base class for layouts used by the fault tolerant compiler to track factory use and CNOT routing
+    Base class for fault-tolerant compiler layouts.
+
+    Attributes:
+        input_circuit: Logical input circuit to map onto the layout.
+        num_t_factories: Number of T factory patches requested for the layout.
+        num_s_factories: Number of S factory patches requested for the layout.
+        factory_specs: Static factory metadata keyed by `ftype`. Correction
+            policies on these specs are the future home for reaction dynamics.
+        mapped_circuit: Input circuit after qubits are mapped to layout
+            `GridQubit`s by `_generate`.
+        layout_graph: Graph whose nodes are data, factory, and ancilla patches.
+            Factory nodes use `patch_type="factory"` and an `ftype` value.
     """
 
     input_circuit: cirq.Circuit
     num_t_factories: int = 0
     num_s_factories: int = 0
+    factory_specs: dict[FactoryType, FactorySpec] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.mapped_circuit = None

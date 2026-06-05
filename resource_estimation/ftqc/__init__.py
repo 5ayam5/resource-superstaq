@@ -33,6 +33,7 @@ from resource_estimation.ftqc.compile_ftqc import (
 from resource_estimation.ftqc.compile_metrics import (
     FTCompileMetricCollector,
     FTCompileResult,
+    ReactionDepthMetricCollector,
 )
 from resource_estimation.ftqc.estimate import ResourceEstimator
 from resource_estimation.ftqc.layout import (
@@ -83,6 +84,7 @@ __all__ = [
     "MovementLayout",
     "Move",
     "ResourceEstimator",
+    "ReactionDepthMetricCollector",
     "RotatedCodePatch",
     "Split",
     "Superconductor",
