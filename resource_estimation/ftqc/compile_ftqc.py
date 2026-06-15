@@ -11,8 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from resource_estimation.ftqc.architecture import Architecture
 import copy
 import os
 import sys
@@ -24,11 +29,9 @@ from warnings import warn
 
 import cirq
 import cirq_superstaq as css
-from cirq.ops.raw_types import Operation
 from cirq_superstaq import Barrier, barrier
 from tqdm import tqdm
 
-from . import architecture as arch
 from . import lattice_surgery_primitives as lsp
 from .layout import Layout
 
@@ -44,9 +47,7 @@ from .layout import Layout
 def knock_off_tqdm(
     moment_idx: int, total: int, tstart: float, message: str
 ) -> None:  # pragma: no cover
-    """
-    Implements tqdm-like behavior for the compiler
-    """
+    """Implements tqdm-like behavior for the compiler"""
     if not sys.stdout.isatty():
         # This is to ensure that testing can progress as normal
         return
@@ -78,9 +79,8 @@ def replace_cirq_op(
     op: cirq.Operation,
     layout: Layout,
     transversal_cnot: bool,
-) -> list[Operation]:
-    """
-    Replacement logic similar to decomposition for cirq operations to be converted to primitives.
+) -> list[cirq.Operation]:
+    """Replacement logic similar to decomposition for cirq operations to be converted to primitives.
 
     op: cirq operation to be unrolled
     layout: Layout of the logical qubits
@@ -89,9 +89,9 @@ def replace_cirq_op(
     """
     if op.gate == cirq.T:
         return teleport_T(op, layout)
-    elif op.gate == cirq.S:
+    if op.gate == cirq.S:
         return teleport_S(op, layout)
-    elif op.gate == cirq.CNOT and not transversal_cnot:
+    if op.gate == cirq.CNOT and not transversal_cnot:
         path_patches = layout.route_cnot(*op.qubits)
         num_qubits = len(path_patches)
         return [
@@ -102,14 +102,16 @@ def replace_cirq_op(
             lsp.Merge(num_qubits=num_qubits - 1, smooth=False).on(*path_patches[1:]),
             lsp.Split(partitions=[1] * (len(path_patches[1:])), smooth=False).on(*path_patches[1:]),
         ]
-    else:
-        raise ValueError(
-            f"Invalid Op for "
-            f"{'transversal' if transversal_cnot else 'non-transversal'} gate: {op.gate}"
-        )
+    raise ValueError(
+        f"Invalid Op for {'transversal' if transversal_cnot else 'non-transversal'} CNOT: {op.gate}"
+    )
 
 
 def teleport_T(op: cirq.Operation, layout: Layout) -> list[cirq.Operation]:
+    if hasattr(layout, "distil"):
+        distil = True
+    else:
+        distil = False
     available_t_factories = layout.available_t_factories
     all_t_factories = [
         factory
@@ -118,7 +120,12 @@ def teleport_T(op: cirq.Operation, layout: Layout) -> list[cirq.Operation]:
     ]
     operations = []
     if not available_t_factories:
-        operations += [lsp.Cultivate(pi / 4).on(factory) for factory in all_t_factories]
+        if distil:
+            operations += [
+                lsp.Distil().on(*layout.distillation_block(factory)) for factory in all_t_factories
+            ]
+        else:
+            operations += [lsp.Cultivate(pi / 4).on(factory) for factory in all_t_factories]
         layout.reload_factories("t")
     data_qubit = op.qubits[0]
     factory_qubit = layout.nearest_factory(data_qubit, ftype="t")
@@ -160,11 +167,9 @@ def handle_idling(
     rounds: int,
     verbose=0,
 ) -> cirq.Circuit:
-    """
-    Helper function for the compiler that handles idling. This way we can experiment with different kinds of idling or even turn it off entirely.
+    """Helper function for the compiler that handles idling. This way we can experiment with different kinds of idling or even turn it off entirely.
     This function is still a work in progress, but it is likely to take the form of various compiler passes.
     """
-
     # TODO: This pass is a main bottleneck for larger experiments, so make it faster
     # Assemble Qubits that will be subject to Idling
     G = layout.layout_graph
@@ -223,10 +228,7 @@ def post_op_syndrome_extraction(
     rounds: int,
     verbose: int = 0,
 ) -> cirq.Circuit:
-    """
-    For movement, it has been suggested that we just do syndrome extraction (for a single round) right after a logical operations.
-    """
-
+    """For movement, it has been suggested that we just do syndrome extraction (for a single round) right after a logical operations."""
     # Allowing a little bit of flexibility on what we want to correct
     # Might even want to add Lattice Primitives, but there aren't many (any?) that are not implicitly corrected
     ops_to_correct = [
@@ -273,10 +275,8 @@ def post_op_syndrome_extraction(
     return cirq.map_operations_and_unroll(circuit, _map_func, raise_if_add_qubits=False)
 
 
-def validate_ops(circuit: cirq.Circuit, verbose: int = 1) -> None:
-    """
-    Checks that the given circuit is in the Clifford+T gateset.
-    """
+def validate_ops(circuit: cirq.Circuit, verbose: int = 1):
+    """Checks that the given circuit is in the Clifford+T gateset."""
     # TODO: This function probably belongs in some utilities file, since it is not particularly integral to compiling.
     valid_gates = (
         cirq.T,
@@ -290,21 +290,20 @@ def validate_ops(circuit: cirq.Circuit, verbose: int = 1) -> None:
     valid_types = (
         cirq.MeasurementGate,
         cirq.ResetChannel,
-        cirq.Rz,  # TODO: Why is this in here
     )
     total_ops = len(list(circuit.all_operations()))
     if not all(
         op.gate in valid_gates or isinstance(op.gate, valid_types)
         for op in tqdm(circuit.all_operations(), total=total_ops, disable=not verbose)
     ):
-        raise ValueError(f"This compiler only handles Clifford + Rz circuits")
+        raise ValueError("This compiler only handles Clifford + T circuits")
 
 
 def _decompose_to_primitives(
     circuit: cirq.Circuit,
     layout: Layout,
-    arc: arch.Architecture,
-) -> cirq.Circuit:
+    arc: Architecture,
+) -> tuple[cirq.Circuit, list[cirq.GridQubit]]:
     primitives = cirq.Gateset(
         *(cirq.GateFamily(g._gate, ignore_global_phase=False) for g in arc.primitives.gates)
     )
@@ -328,9 +327,7 @@ def add_moves(
     alley_ops: cirq.Gateset,
     verbose: int = 0,
 ) -> cirq.Circuit:
-    """
-    Handles replacement moves for both alley movement and interaction zone movement
-    """
+    """Handles replacement moves for both alley movement and interaction zone movement"""
     total = len(circuit)
     tstart = time()
 
@@ -363,14 +360,13 @@ def add_moves(
 
 def ft_compile(
     layout: Layout,
-    arc: arch.Architecture,
+    arc: Architecture,
     verbose: int = 1,
     with_barriers: bool = False,
     num_threads: int = 1,
     skip_validation: bool = False,
-):
-    """
-    Basic read/replace compiler that converts a cirq Circuit over the Clifford + T gateset to a cirq circuit of primitives.
+) -> cirq.Circuit:
+    """Basic read/replace compiler that converts a cirq Circuit over the Clifford + T gateset to a cirq circuit of primitives.
     The layout input contains the input circuit and information about any routing that might be necessary during the compilation process.
     The architecture input contains information about what primtives are accessible to the compiler and which extra passes should be added to the primitive circuit.
     The passes available are post op correction and idling.

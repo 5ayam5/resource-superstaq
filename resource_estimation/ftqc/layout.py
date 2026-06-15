@@ -90,18 +90,14 @@ class Layout(abc.ABC):
         )
 
     def set_map_circuit(self, qubit_map: dict[cirq.Qid, cirq.GridQubit]) -> None:
-        """
-        Apply a given mapping from qubits in the input circuit to GridQubits used for compilation
-        """
+        """Apply a given mapping from qubits in the input circuit to GridQubits used for compilation"""
         mapped_circuit = cirq.Circuit(
             moment.transform_qubits(qubit_map) for moment in self.input_circuit
         )
         self.mapped_circuit = mapped_circuit
 
     def reset_graph(self) -> None:
-        """
-        Reset the graph to its starting state by setting all factory qubits to the `used` state
-        """
+        """Reset the graph to its starting state by setting all factory qubits to the `used` state"""
         G = self.layout_graph
         for node in G.nodes:
             if G.nodes[node]["patch_type"] == "factory":
@@ -133,8 +129,7 @@ class Layout(abc.ABC):
                 self.layout_graph.nodes[node]["used"] = False
 
     def _generate(self) -> None:
-        """
-        Private method to generate the underlying networkx graph, qubit map, and qubit placement
+        """Private method to generate the underlying networkx graph, qubit map, and qubit placement
         This method is the core of what defines a Layout
         At this level, the graph generated has no locality, but methods in subclasses should be local (especially lattice surgery layouts)
         """
@@ -188,8 +183,7 @@ class Layout(abc.ABC):
         return self._available_s_factories
 
     def nearest_factory(self, qubit: cirq.GridQubit, ftype: Literal["s", "t"]) -> cirq.GridQubit:
-        """
-        Finds the closest factory of desired type according to the Manhattan distance using the GridQubit indices of the factory qubits that do not have the `used` status
+        """Finds the closest factory of desired type according to the Manhattan distance using the GridQubit indices of the factory qubits that do not have the `used` status
         Removes the returned factory from the available options and sets its status to `used`
         """
         available_factories = (
@@ -210,8 +204,7 @@ class Layout(abc.ABC):
         return factory
 
     def route_cnot(self, ctrl: cirq.GridQubit, trgt: cirq.GridQubit) -> list[cirq.GridQubit]:
-        """
-        Finds the patches required to perform a lattice surgery CNOT between two logical qubits
+        """Finds the patches required to perform a lattice surgery CNOT between two logical qubits
         The path returned must include at least one ancilla
         This method does not account for other CNOTs in the logical circuit, so choosing the shortest path might not correspond to the optimal path
         """
@@ -219,22 +212,25 @@ class Layout(abc.ABC):
         G = self.layout_graph
 
         def custom_weight(u: cirq.GridQubit, v: cirq.GridQubit, attr: dict) -> int | None:
+            # First condition not covered because Distillation has not been implemented for lattice layouts
+            if (
+                G.nodes[v]["patch_type"] == "block" or G.nodes[u]["patch_type"] == "block"
+            ):  # pragma: no cover
+                return None
             if (G.nodes[v]["patch_type"] == "data") or (G.nodes[v]["patch_type"] == "factory"):
                 # Must go through at least one ancilla
                 if (v == trgt and u == ctrl) or (u == trgt and v == ctrl):
                     return None
-                elif v == trgt or v == ctrl:
+                if v == trgt or v == ctrl:
                     return 1
-                else:
-                    return None
+                return None
             return 1
 
         path = nx.dijkstra_path(G=G, source=ctrl, target=trgt, weight=custom_weight)
         return path
 
     def draw(self) -> None:  # pragma: no cover
-        """
-        Draw method to display layouts clearly
+        """Draw method to display layouts clearly
         Red and yellow nodes correspond to T and S factories, respectively
         Green nodes correspond to data (logical) qubits
         Blue nodes correspond to ancilla qubits
@@ -244,6 +240,7 @@ class Layout(abc.ABC):
             "s": "yellow",
             "data": "green",
             "ancilla": "blue",
+            "block": "pink",
         }
         G = self.layout_graph
         node_color = []
@@ -256,12 +253,10 @@ class Layout(abc.ABC):
 
 
 class MovementLayout(Layout):
-    """
-    Layout class representing the connections available to Movement Architectures.
-
-    It does not have S factories and the number of T factories is fully
-    configurable. When `factory_specs` is omitted, it defaults to the
-    auto-corrected T factory spec whenever `num_t_factories > 0`.
+    """Layout class representing the connections available to Movement Architectures
+    It does not have S factories and the number of T factories is fully configurable
+    The current implementation assumes all-to-all connectivity in the logical qubit layout because the cost for nonlocal moves is handled deeper in the stack
+    A better implementation might do a smart placement of qubits on the grid to minimize overall distance travelled
     """
 
     # TODO: build this implementation
@@ -334,8 +329,7 @@ class Column(Layout):
 
     @override
     def _generate(self) -> None:
-        """
-        Places and assigns logical qubits according to the column configuration
+        """Places and assigns logical qubits according to the column configuration
         In the case where the number of logical qubits is odd fill the would-be logical qubit with an ancilla
         """
         qubit_map: dict[cirq.Qid, cirq.GridQubit] = {}
@@ -407,9 +401,7 @@ class FactorySandwich(Layout):
 
     @override
     def _generate(self) -> None:
-        """
-        Places and assigns logical qubits according to the Sandwich configuration
-        """
+        """Places and assigns logical qubits according to the Sandwich configuration"""
         qubit_map: dict[cirq.Qid, cirq.GridQubit] = {}
         all_qubits = list(self.input_circuit.all_qubits())
         length = max(len(all_qubits), self.num_t_factories, self.num_s_factories)
@@ -448,12 +440,12 @@ class FactorySandwich(Layout):
 
 
 class Embedded(Layout):
-    """
-    Lattice surgery layout based on packing logical qubits into a rectangle.
-
-    Factories surround the main array, alternating between S and T designation.
+    """Lattice surgery layout based on packing logical qubits into a rectangle with ancilla patches forming gaps between them
+    Without the ancilla patches, the logical qubits would be nearest neighbor
+    Factories surround the main array, alternating between S and T designation
     When `factory_specs` is omitted, defaults are chosen after generation from
     the T and S factory counts discovered by this layout.
+    This Layout currently cannot increase/decrease the number of factories of either type
     The inspiration for this layout was a conversation with Ben, where he described the output of the MCM compiler being nearest-neighbor connectivity
     So I wanted a Layout that could potentially be compatible with that kind of output
     """
@@ -483,9 +475,7 @@ class Embedded(Layout):
 
     @override
     def _generate(self) -> None:
-        """
-        Builds a large embedded logical qubit array by starting from a nearest neighbor array and adding rows/columns of other qubit types
-        """
+        """Builds a large embedded logical qubit array by starting from a nearest neighbor array and adding rows/columns of other qubit types"""
         all_qubits = list(self.input_circuit.all_qubits())
         num_logicals = len(all_qubits)
         side_length = ceil(sqrt(num_logicals))
@@ -567,3 +557,58 @@ class Embedded(Layout):
         self.layout_graph = G
         self.num_s_factories = len(s_factories)
         self.num_t_factories = len(t_factories)
+
+
+class MovementDistillery(MovementLayout):
+    def __init__(
+        self,
+        input_circuit: cirq.Circuit,
+        num_t_factories: int = 0,
+    ) -> None:
+        super().__init__(
+            input_circuit=input_circuit,
+            num_t_factories=num_t_factories,
+        )
+        self.distil = True
+
+    def _generate(self) -> None:
+        program_qubits = len(self.input_circuit.all_qubits())
+        distillation_qubits = 31 * self.num_t_factories
+        total_qubits = program_qubits + distillation_qubits
+        side_length = ceil(sqrt(total_qubits))
+
+        def idx_to_xy(idx: int) -> tuple[int, int]:
+            x = idx // side_length
+            y = idx % side_length
+            return x, y
+
+        qubit_map = {
+            qid: cirq.GridQubit(*idx_to_xy(idx))
+            for idx, qid in enumerate(sorted(self.input_circuit.all_qubits()))
+        }
+        self.set_map_circuit(qubit_map=qubit_map)
+        G = nx.Graph()
+        G.add_nodes_from(
+            [(q, dict(patch_type="data")) for q in qubit_map.values()],
+        )
+        for factory_index in range(self.num_t_factories):
+            qubit_index = factory_index * 31 + program_qubits
+            output_qubit = cirq.GridQubit(*idx_to_xy(qubit_index))
+            G.add_node(output_qubit, patch_type="factory", ftype="t", fid=factory_index, used=True)
+            block_qubits = [cirq.GridQubit(*idx_to_xy(qubit_index + i)) for i in range(1, 31)]
+            G.add_nodes_from(
+                [(q, dict(patch_type="block", fid=factory_index)) for q in block_qubits]
+            )
+        # Movement layouts assume all-to-all connectivity; avoid storing O(n^2) edges explicitly.
+        self._all_factories = {node for node in G if G.nodes[node]["patch_type"] == "factory"}
+        self.layout_graph = G
+
+    def distillation_block(self, factory_qubit: cirq.GridQubit) -> list[cirq.GridQubit]:
+        G = self.layout_graph
+        fid = G.nodes[factory_qubit]["fid"]
+        block_qubits = [
+            q
+            for q in G.nodes
+            if (G.nodes[q]["patch_type"] == "block") and (G.nodes[q]["fid"] == fid)
+        ]
+        return block_qubits + [factory_qubit]
