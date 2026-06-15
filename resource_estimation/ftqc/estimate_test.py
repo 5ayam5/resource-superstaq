@@ -431,25 +431,15 @@ def test_reaction_depth_rejects_non_factory_non_clifford(movement_estimator) -> 
 
 
 def test_reaction_depth_wraps_clifford_conjugation_errors(movement_estimator, monkeypatch) -> None:
-    class _FailingPauliString:
-        """Test double that forces the Clifford-conjugation wrapper path."""
-
-        def conjugated_by(self, input_op: cirq.Operation) -> cirq.PauliString:
-            """Raise in the same shape as Cirq's PauliString conjugation errors."""
-            raise ValueError("cannot conjugate")
+    def raise_conjugation_error(
+        self: cirq.PauliString,
+        input_op: cirq.Operation,
+    ) -> cirq.PauliString:
+        raise ValueError("cannot conjugate")
 
     qubit = cirq.LineQubit(0)
     layout = MovementLayout(cirq.Circuit(cirq.T(qubit), cirq.H(qubit)), num_t_factories=1)
-    monkeypatch.setattr(
-        movement_estimator,
-        "_pauli_string_for_basis",
-        lambda qubit, basis: _FailingPauliString(),
-    )
+    monkeypatch.setattr(cirq.PauliString, "conjugated_by", raise_conjugation_error)
 
     with pytest.raises(ValueError, match="non-Clifford operation without a factory spec"):
         movement_estimator.reaction_depth(layout)
-
-
-def test_reaction_depth_rejects_unsupported_pauli_factor(movement_estimator) -> None:
-    with pytest.raises(ValueError, match="Unsupported Pauli factor"):
-        movement_estimator._reaction_bases_for_pauli(cirq.I)

@@ -41,13 +41,6 @@ def test_factory_spec_stores_correction_metadata():
     assert factory_spec.correction_policy.reaction_dynamic([{"X": 1, "Z": 2}]) == [{"X": 1, "Z": 2}]
 
 
-def test_factory_type_for_gate_matches_layout_ftype_strings():
-    assert factory_specs.factory_type_for_gate(cirq.T) == "t"
-    assert factory_specs.factory_type_for_gate(cirq.S) == "s"
-    assert factory_specs.factory_type_for_gate(cirq.CCZ) == "ccz"
-    assert factory_specs.factory_type_for_gate(None) == ""
-
-
 @pytest.mark.parametrize(
     ("auto_corrected_spec", "non_auto_corrected_spec", "ftype", "produced_gate"),
     [
@@ -86,15 +79,14 @@ def test_standard_s_factory_spec():
     assert factory_specs.S_FACTORY_SPEC.name == "s"
     assert factory_specs.S_FACTORY_SPEC.ftype == "s"
     assert factory_specs.S_FACTORY_SPEC.produced_gate == cirq.S
-    assert factory_specs.S_FACTORY_SPEC.correction_policy is factory_specs.S_CORRECTION_POLICY
     assert factory_specs.S_FACTORY_SPEC.correction_policy.name == "s"
 
 
 @pytest.mark.parametrize(
     "correction_policy",
     [
-        factory_specs.T_NON_AUTO_CORRECTED_CORRECTION_POLICY,
-        factory_specs.S_CORRECTION_POLICY,
+        factory_specs.T_NON_AUTO_CORRECTED_FACTORY_SPEC.correction_policy,
+        factory_specs.S_FACTORY_SPEC.correction_policy,
     ],
 )
 def test_single_qubit_increment_both_reaction_dynamics(correction_policy):
@@ -108,7 +100,9 @@ def test_ccz_non_auto_corrected_reaction_dynamic_increments_each_qubit():
         {"X": 7, "Z": 1},
     ]
 
-    assert factory_specs.CCZ_NON_AUTO_CORRECTED_CORRECTION_POLICY.reaction_dynamic(old_depths) == [
+    assert factory_specs.CCZ_NON_AUTO_CORRECTED_FACTORY_SPEC.correction_policy.reaction_dynamic(
+        old_depths
+    ) == [
         {"X": 1, "Z": 1},
         {"X": 5, "Z": 6},
         {"X": 8, "Z": 2},
@@ -124,13 +118,13 @@ def test_ccz_non_auto_corrected_reaction_dynamic_increments_each_qubit():
     ],
 )
 def test_t_auto_corrected_reaction_dynamic_updates_single_qubit(old_depth, expected_depth):
-    assert factory_specs.T_AUTO_CORRECTED_CORRECTION_POLICY.reaction_dynamic([old_depth]) == [
-        expected_depth
-    ]
+    assert factory_specs.T_AUTO_CORRECTED_FACTORY_SPEC.correction_policy.reaction_dynamic(
+        [old_depth]
+    ) == [expected_depth]
 
 
 def test_s_reaction_dynamic_increments_both_bases():
-    assert factory_specs.S_CORRECTION_POLICY.reaction_dynamic([{"X": 2, "Z": 5}]) == [
+    assert factory_specs.S_FACTORY_SPEC.correction_policy.reaction_dynamic([{"X": 2, "Z": 5}]) == [
         {"X": 3, "Z": 6}
     ]
 
@@ -183,7 +177,7 @@ def test_ccz_auto_corrected_reaction_dynamic_updates_controls_and_target(
     old_depths, expected_depths
 ):
     assert (
-        factory_specs.CCZ_AUTO_CORRECTED_CORRECTION_POLICY.reaction_dynamic(old_depths)
+        factory_specs.CCZ_AUTO_CORRECTED_FACTORY_SPEC.correction_policy.reaction_dynamic(old_depths)
         == expected_depths
     )
 

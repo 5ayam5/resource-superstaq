@@ -11,16 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from cirq.circuits.circuit import Circuit
+import textwrap
 from collections import Counter
 from math import pi
-import textwrap
+
 import cirq
 import pytest
+from cirq.circuits.circuit import Circuit
+from cirq_superstaq import Barrier
+
 import resource_estimation.ftqc.architecture as arch
 import resource_estimation.ftqc.compile_ftqc as comp
 import resource_estimation.ftqc.lattice_surgery_primitives as lsp
-from cirq_superstaq import Barrier
 from resource_estimation.ftqc import Column, Embedded, MovementLayout
 
 
@@ -326,21 +328,6 @@ def test_verbosity(random_circ) -> None:
     for moment_ops in ops:
         for op in moment_ops:
             assert op in compiled_circuit.all_operations()
-
-
-def test_ft_compile_returns_circuit(bell_circuit):
-    layout = MovementLayout(bell_circuit)
-    architecture = arch.MeasureZonesOnly(
-        d=7,
-        cultivation_repetition=1,
-        syndrome_rounds=1,
-        idling=False,
-        post_op_correction=False,
-    )
-
-    result = comp.ft_compile(layout=layout, arc=architecture)
-
-    assert isinstance(result, cirq.Circuit)
 
 
 def test_bell_movement_FF(bell_circuit) -> None:

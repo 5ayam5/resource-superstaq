@@ -19,23 +19,8 @@ from typing import Literal
 
 import cirq
 
-ReactionBasis = Literal["X", "Z"]
-ReactionDepth = dict[ReactionBasis, int]
+ReactionDepth = dict[Literal["X", "Z"], int]
 ReactionDepthState = list[ReactionDepth]
-ReactionDynamic = Callable[[ReactionDepthState], ReactionDepthState]
-FactoryType = str
-
-
-def factory_type_for_gate(gate: cirq.Gate | None) -> FactoryType:
-    """Return the layout `ftype` string corresponding to a logical gate.
-
-    Layout graph nodes already use lowercase `ftype` strings such as `"t"` and
-    `"s"`. The reaction-depth collector uses this helper so factory membership
-    checks and factory-spec lookup use the same representation.
-    """
-    if gate is None:
-        return ""
-    return str(gate).lower()
 
 
 @dataclass(frozen=True)
@@ -52,7 +37,7 @@ class CorrectionPolicy:
     name: str
     """Stable name for this correction policy."""
 
-    reaction_dynamic: ReactionDynamic
+    reaction_dynamic: Callable[[ReactionDepthState], ReactionDepthState]
     """Reaction-depth update rule for all qubits acted on by this correction policy."""
 
 
@@ -70,7 +55,7 @@ class FactorySpec:
     name: str
     """Stable name for this factory spec."""
 
-    ftype: FactoryType
+    ftype: str
     """Factory type string used by layout graph nodes."""
 
     produced_gate: cirq.Gate
@@ -165,63 +150,57 @@ def _ccz_non_auto_corrected_reaction_dynamic(_old_depths: ReactionDepthState) ->
     return [{"X": depths.get("X", 0) + 1, "Z": depths.get("Z", 0) + 1} for depths in _old_depths]
 
 
-T_AUTO_CORRECTED_CORRECTION_POLICY = CorrectionPolicy(
-    name="t-auto-corrected",
-    reaction_dynamic=_t_auto_corrected_reaction_dynamic,
-)
-T_NON_AUTO_CORRECTED_CORRECTION_POLICY = CorrectionPolicy(
-    name="t-non-auto-corrected",
-    reaction_dynamic=_t_non_auto_corrected_reaction_dynamic,
-)
-S_CORRECTION_POLICY = CorrectionPolicy(
-    name="s",
-    reaction_dynamic=_s_reaction_dynamic,
-)
-CCZ_AUTO_CORRECTED_CORRECTION_POLICY = CorrectionPolicy(
-    name="ccz-auto-corrected",
-    reaction_dynamic=_ccz_auto_corrected_reaction_dynamic,
-)
-CCZ_NON_AUTO_CORRECTED_CORRECTION_POLICY = CorrectionPolicy(
-    name="ccz-non-auto-corrected",
-    reaction_dynamic=_ccz_non_auto_corrected_reaction_dynamic,
-)
-
 T_AUTO_CORRECTED_FACTORY_SPEC = FactorySpec(
     name="t-auto-corrected",
     ftype="t",
     produced_gate=cirq.T,
-    correction_policy=T_AUTO_CORRECTED_CORRECTION_POLICY,
+    correction_policy=CorrectionPolicy(
+        name="t-auto-corrected",
+        reaction_dynamic=_t_auto_corrected_reaction_dynamic,
+    ),
 )
 T_NON_AUTO_CORRECTED_FACTORY_SPEC = FactorySpec(
     name="t-non-auto-corrected",
     ftype="t",
     produced_gate=cirq.T,
-    correction_policy=T_NON_AUTO_CORRECTED_CORRECTION_POLICY,
+    correction_policy=CorrectionPolicy(
+        name="t-non-auto-corrected",
+        reaction_dynamic=_t_non_auto_corrected_reaction_dynamic,
+    ),
 )
 S_FACTORY_SPEC = FactorySpec(
     name="s",
     ftype="s",
     produced_gate=cirq.S,
-    correction_policy=S_CORRECTION_POLICY,
+    correction_policy=CorrectionPolicy(
+        name="s",
+        reaction_dynamic=_s_reaction_dynamic,
+    ),
 )
 CCZ_AUTO_CORRECTED_FACTORY_SPEC = FactorySpec(
     name="ccz-auto-corrected",
     ftype="ccz",
     produced_gate=cirq.CCZ,
-    correction_policy=CCZ_AUTO_CORRECTED_CORRECTION_POLICY,
+    correction_policy=CorrectionPolicy(
+        name="ccz-auto-corrected",
+        reaction_dynamic=_ccz_auto_corrected_reaction_dynamic,
+    ),
 )
 CCZ_NON_AUTO_CORRECTED_FACTORY_SPEC = FactorySpec(
     name="ccz-non-auto-corrected",
     ftype="ccz",
     produced_gate=cirq.CCZ,
-    correction_policy=CCZ_NON_AUTO_CORRECTED_CORRECTION_POLICY,
+    correction_policy=CorrectionPolicy(
+        name="ccz-non-auto-corrected",
+        reaction_dynamic=_ccz_non_auto_corrected_reaction_dynamic,
+    ),
 )
 
 
 def default_factory_specs(
     num_t_factories: int,
     num_s_factories: int,
-) -> dict[FactoryType, FactorySpec]:
+) -> dict[str, FactorySpec]:
     """Return default factory specs for factory types present in a layout.
 
     Args:
@@ -235,7 +214,7 @@ def default_factory_specs(
         auto-corrected T spec when `num_t_factories` is positive and the
         standard S spec when `num_s_factories` is positive.
     """
-    specs: dict[FactoryType, FactorySpec] = {}
+    specs: dict[str, FactorySpec] = {}
     if num_t_factories > 0:
         specs["t"] = T_AUTO_CORRECTED_FACTORY_SPEC
     if num_s_factories > 0:
@@ -244,23 +223,14 @@ def default_factory_specs(
 
 
 __all__ = [
-    "CCZ_AUTO_CORRECTED_CORRECTION_POLICY",
     "CCZ_AUTO_CORRECTED_FACTORY_SPEC",
-    "CCZ_NON_AUTO_CORRECTED_CORRECTION_POLICY",
     "CCZ_NON_AUTO_CORRECTED_FACTORY_SPEC",
     "CorrectionPolicy",
     "FactorySpec",
-    "FactoryType",
-    "ReactionBasis",
     "ReactionDepth",
     "ReactionDepthState",
-    "ReactionDynamic",
-    "S_CORRECTION_POLICY",
     "S_FACTORY_SPEC",
-    "T_AUTO_CORRECTED_CORRECTION_POLICY",
     "T_AUTO_CORRECTED_FACTORY_SPEC",
-    "T_NON_AUTO_CORRECTED_CORRECTION_POLICY",
     "T_NON_AUTO_CORRECTED_FACTORY_SPEC",
     "default_factory_specs",
-    "factory_type_for_gate",
 ]

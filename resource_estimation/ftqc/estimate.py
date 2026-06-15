@@ -20,11 +20,7 @@ from collections import Counter, defaultdict
 import cirq
 
 from resource_estimation.ftqc.architecture import Architecture
-from resource_estimation.ftqc.factory_specs import (
-    ReactionBasis,
-    ReactionDepth,
-    factory_type_for_gate,
-)
+from resource_estimation.ftqc.factory_specs import ReactionDepth
 from resource_estimation.ftqc.layout import Layout
 from tqdm import tqdm
 
@@ -86,7 +82,7 @@ class ResourceEstimator:
             ValueError: If a factory dynamic returns the wrong number of qubit
                 updates, or if a non-factory operation is not Clifford.
         """
-        factory_type = factory_type_for_gate(input_op.gate)
+        factory_type = "" if input_op.gate is None else str(input_op.gate).lower()
         factory_spec = layout.factory_specs.get(factory_type)
         if factory_spec is None:
             self._apply_clifford_reaction_depth(input_op, reaction_depth)
@@ -118,12 +114,13 @@ class ResourceEstimator:
             ValueError: If `input_op` is not Clifford in the supported Cirq
                 model.
         """
+        non_clifford_message = (
+            "Reaction-depth metric encountered a non-Clifford operation without a "
+            f"factory spec: {input_op!r}. Add a matching factory spec to "
+            "`layout.factory_specs` to define its reaction dynamics."
+        )
         if input_op.gate is None or not cirq.has_stabilizer_effect(input_op.gate):
-            raise ValueError(
-                "Reaction-depth metric encountered a non-Clifford operation without a "
-                f"factory spec: {input_op!r}. Add a matching factory spec to "
-                "`layout.factory_specs` to define its reaction dynamics."
-            )
+            raise ValueError(non_clifford_message)
 
         old_depths: dict[cirq.Qid, ReactionDepth] = {}
         new_depths: defaultdict[cirq.Qid, ReactionDepth] = defaultdict(lambda: {"X": 0, "Z": 0})
@@ -134,62 +131,29 @@ class ResourceEstimator:
             old_depths[qubit] = dict(old_depth)
             new_depths[qubit] = {"X": 0, "Z": 0}
 
-        try:
-            for source_qubit, source_depth in old_depths.items():
-                for source_basis, depth in source_depth.items():
-                    source_pauli = self._pauli_string_for_basis(source_qubit, source_basis)
+        for source_qubit, source_depth in old_depths.items():
+            for source_basis, depth in source_depth.items():
+                source_pauli = cirq.PauliString(
+                    cirq.X(source_qubit) if source_basis == "X" else cirq.Z(source_qubit)
+                )
+                try:
                     propagated_pauli = source_pauli.conjugated_by(input_op)
-                    for target_qubit in propagated_pauli.qubits:
-                        target_pauli = propagated_pauli.get(target_qubit)
-                        for target_basis in self._reaction_bases_for_pauli(target_pauli):
-                            target_depth = new_depths[target_qubit]
-                            target_depth[target_basis] = max(target_depth[target_basis], depth)
-        except ValueError as exc:
-            raise ValueError(
-                "Reaction-depth metric encountered a non-Clifford operation without a "
-                f"factory spec: {input_op!r}. Add a matching factory spec to "
-                "`layout.factory_specs` to define its reaction dynamics."
-            ) from exc
+                except ValueError as exc:
+                    raise ValueError(non_clifford_message) from exc
+
+                for target_qubit in propagated_pauli.qubits:
+                    target_pauli = propagated_pauli.get(target_qubit)
+                    target_bases = {
+                        cirq.X: ("X",),
+                        cirq.Z: ("Z",),
+                        cirq.Y: ("X", "Z"),
+                    }[target_pauli]
+                    target_depth = new_depths[target_qubit]
+                    for target_basis in target_bases:
+                        target_depth[target_basis] = max(target_depth[target_basis], depth)
 
         for qubit, new_depth in new_depths.items():
             reaction_depth[qubit].update(new_depth)
-
-    @staticmethod
-    def _pauli_string_for_basis(
-        qubit: cirq.Qid,
-        basis: ReactionBasis,
-    ) -> cirq.PauliString:
-        """Return a single-qubit Pauli string for one tracked reaction basis.
-
-        Args:
-            qubit: Qubit carrying the tracked reaction-depth basis.
-            basis: Reaction basis to convert to a Cirq Pauli string.
-
-        Returns:
-            A single-qubit `cirq.PauliString` containing X or Z on `qubit`.
-        """
-        return cirq.PauliString(cirq.X(qubit) if basis == "X" else cirq.Z(qubit))
-
-    @staticmethod
-    def _reaction_bases_for_pauli(pauli: cirq.Pauli) -> tuple[ReactionBasis, ...]:
-        """Return the reaction bases represented by a Cirq Pauli factor.
-
-        Args:
-            pauli: Pauli factor produced by Clifford conjugation.
-
-        Returns:
-            `("X",)` for X, `("Z",)` for Z, and `("X", "Z")` for Y.
-
-        Raises:
-            ValueError: If an unexpected Pauli factor is supplied.
-        """
-        if pauli == cirq.X:
-            return ("X",)
-        if pauli == cirq.Z:
-            return ("Z",)
-        if pauli == cirq.Y:
-            return ("X", "Z")
-        raise ValueError(f"Unsupported Pauli factor for reaction-depth tracking: {pauli!r}")
 
     def validate_circuit_ops(self, circuit: cirq.Circuit) -> None:
         """

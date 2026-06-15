@@ -25,7 +25,7 @@ import networkx as nx
 import numpy as np
 from typing_extensions import override
 
-from .factory_specs import FactorySpec, FactoryType, default_factory_specs
+from .factory_specs import FactorySpec, default_factory_specs
 
 
 @dataclass
@@ -49,14 +49,14 @@ class Layout(abc.ABC):
     input_circuit: cirq.Circuit
     num_t_factories: int = 0
     num_s_factories: int = 0
-    factory_specs: dict[FactoryType, FactorySpec] = field(init=False)
+    factory_specs: dict[str, FactorySpec] = field(init=False)
 
     def __init__(
         self,
         input_circuit: cirq.Circuit,
         num_t_factories: int = 0,
         num_s_factories: int = 0,
-        factory_specs: dict[FactoryType, FactorySpec] | None = None,
+        factory_specs: dict[str, FactorySpec] | None = None,
     ) -> None:
         """Initialize layout state, graph placement, and factory spec metadata.
 
@@ -270,7 +270,7 @@ class MovementLayout(Layout):
         self,
         input_circuit: cirq.Circuit,
         num_t_factories: int = 1,
-        factory_specs: dict[FactoryType, FactorySpec] | None = None,
+        factory_specs: dict[str, FactorySpec] | None = None,
     ) -> None:
         """Initialize a movement layout with configurable T factories.
 
@@ -312,7 +312,7 @@ class Column(Layout):
     def __init__(
         self,
         input_circuit: cirq.Circuit,
-        factory_specs: dict[FactoryType, FactorySpec] | None = None,
+        factory_specs: dict[str, FactorySpec] | None = None,
     ) -> None:
         """Initialize a column layout with T and S factories derived from width.
 
@@ -463,7 +463,7 @@ class Embedded(Layout):
     def __init__(
         self,
         input_circuit: cirq.Circuit,
-        factory_specs: dict[FactoryType, FactorySpec] | None = None,
+        factory_specs: dict[str, FactorySpec] | None = None,
     ) -> None:
         """Initialize an embedded layout with generated T and S factory counts.
 
