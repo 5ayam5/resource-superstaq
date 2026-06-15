@@ -30,14 +30,8 @@ from resource_estimation.ftqc.compile_ftqc import (
     teleport_T,
     validate_ops,
 )
+from resource_estimation.ftqc.distil import distil_15_to_1
 from resource_estimation.ftqc.estimate import ResourceEstimator
-from resource_estimation.ftqc.layout import (
-    Column,
-    Embedded,
-    FactorySandwich,
-    Layout,
-    MovementLayout,
-)
 from resource_estimation.ftqc.lattice_surgery_primitives import (
     BufferCodePatch,
     Cultivate,
@@ -51,13 +45,19 @@ from resource_estimation.ftqc.lattice_surgery_primitives import (
     SyndromeExtract,
     custom_resolver,
 )
+from resource_estimation.ftqc.layout import (
+    Column,
+    Embedded,
+    FactorySandwich,
+    Layout,
+    MovementLayout,
+)
 from resource_estimation.ftqc.stim_functions import (
     STR2GATE,
     count_stim_resources,
     cultivate,
     load_saved_cost,
 )
-from resource_estimation.ftqc.distil import distil_15_to_1
 
 __all__ = [
     "Architecture",

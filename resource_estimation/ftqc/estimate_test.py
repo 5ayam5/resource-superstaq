@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from resource_estimation.ftqc import ResourceEstimator
 from math import pi
 
 import cirq
@@ -19,15 +18,15 @@ import pytest
 from numpy import isclose
 
 import resource_estimation.ftqc.architecture as arch
-import resource_estimation.ftqc.estimate as est
 import resource_estimation.ftqc.factory_specs as factory_specs
 import resource_estimation.ftqc.lattice_surgery_primitives as lsp
-from resource_estimation.ftqc import Column, MovementLayout
+from resource_estimation.ftqc.estimate import ResourceEstimator
+from resource_estimation.ftqc.layout import Column, MovementLayout
 
 
 @pytest.fixture
 def lattice_estimator() -> ResourceEstimator:
-    return est.ResourceEstimator(
+    return ResourceEstimator(
         arc=arch.DefaultLattice(
             d=5,
             idling=True,
@@ -40,7 +39,7 @@ def lattice_estimator() -> ResourceEstimator:
 
 @pytest.fixture
 def movement_estimator() -> ResourceEstimator:
-    return est.ResourceEstimator(
+    return ResourceEstimator(
         arc=arch.DefaultMovement(
             d=5,
             idling=True,
@@ -55,7 +54,7 @@ def movement_estimator() -> ResourceEstimator:
 @pytest.mark.parametrize(
     "estimator",
     [
-        est.ResourceEstimator(
+        ResourceEstimator(
             arc=arch.DefaultMovement(
                 d=5,
                 idling=True,
@@ -65,7 +64,7 @@ def movement_estimator() -> ResourceEstimator:
                 syndrome_rounds=None,
             )
         ),
-        est.ResourceEstimator(
+        ResourceEstimator(
             arc=arch.DefaultLattice(
                 d=5,
                 idling=True,
@@ -208,7 +207,7 @@ def test_critical_path() -> None:
     c2 += cirq.S.on(q0)
     c2 += cirq.CNOT.on(q0, q1)
     arc = arch.DefaultMovement()
-    estim = est.ResourceEstimator(arc)
+    estim = ResourceEstimator(arc)
     # Should be identical aside from floating point errors
     assert isclose(estim.serial_circuit_time(c1), estim.serial_circuit_time(c2), atol=1e-5)
 

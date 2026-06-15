@@ -16,12 +16,12 @@ from __future__ import annotations
 import copy
 import warnings
 from collections import Counter, defaultdict
+from typing import TYPE_CHECKING
 
 import cirq
 
 from resource_estimation.ftqc.factory_specs import ReactionDepth
 from resource_estimation.ftqc.layout import Layout
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from resource_estimation.ftqc.architecture import Architecture
