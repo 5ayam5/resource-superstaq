@@ -19,7 +19,7 @@ import resource_estimation.ftqc.architecture as arch
 import resource_estimation.ftqc.estimate as est
 import resource_estimation.ftqc.factory_specs as factory_specs
 import resource_estimation.ftqc.lattice_surgery_primitives as lsp
-from resource_estimation.ftqc import MovementLayout
+from resource_estimation.ftqc import Column, MovementLayout
 from numpy import isclose
 
 
@@ -261,6 +261,62 @@ def test_reaction_depth_uses_layout_default_factory_specs(movement_estimator) ->
     layout = MovementLayout(cirq.Circuit(cirq.T(qubit)), num_t_factories=1)
 
     assert movement_estimator.reaction_depth(layout) == {cirq.GridQubit(0, 0): {"X": 0, "Z": 1}}
+
+
+def test_reaction_depth_uses_layout_default_s_factory_spec(lattice_estimator) -> None:
+    qubit = cirq.LineQubit(0)
+    layout = Column(cirq.Circuit(cirq.S(qubit)))
+    mapped_qubit = next(iter(layout.mapped_circuit.all_operations())).qubits[0]
+
+    assert lattice_estimator.reaction_depth(layout) == {mapped_qubit: {"X": 1, "Z": 1}}
+
+
+def test_reaction_depth_uses_explicit_non_auto_corrected_t_factory_spec(
+    movement_estimator,
+) -> None:
+    qubit = cirq.LineQubit(0)
+    layout = MovementLayout(
+        cirq.Circuit(cirq.T(qubit)),
+        factory_specs={"t": factory_specs.T_NON_AUTO_CORRECTED_FACTORY_SPEC},
+    )
+
+    assert movement_estimator.reaction_depth(layout) == {cirq.GridQubit(0, 0): {"X": 1, "Z": 1}}
+
+
+def test_reaction_depth_uses_explicit_auto_corrected_ccz_factory_spec(movement_estimator) -> None:
+    control1, control2, target = cirq.LineQubit.range(3)
+    layout = MovementLayout(
+        cirq.Circuit(cirq.CCZ(control1, control2, target)),
+        factory_specs={"ccz": factory_specs.CCZ_AUTO_CORRECTED_FACTORY_SPEC},
+    )
+    mapped_control1, mapped_control2, mapped_target = next(
+        iter(layout.mapped_circuit.all_operations())
+    ).qubits
+
+    assert movement_estimator.reaction_depth(layout) == {
+        mapped_control1: {"X": 0, "Z": 1},
+        mapped_control2: {"X": 0, "Z": 1},
+        mapped_target: {"X": 1, "Z": 0},
+    }
+
+
+def test_reaction_depth_uses_explicit_non_auto_corrected_ccz_factory_spec(
+    movement_estimator,
+) -> None:
+    control1, control2, target = cirq.LineQubit.range(3)
+    layout = MovementLayout(
+        cirq.Circuit(cirq.CCZ(control1, control2, target)),
+        factory_specs={"ccz": factory_specs.CCZ_NON_AUTO_CORRECTED_FACTORY_SPEC},
+    )
+    mapped_control1, mapped_control2, mapped_target = next(
+        iter(layout.mapped_circuit.all_operations())
+    ).qubits
+
+    assert movement_estimator.reaction_depth(layout) == {
+        mapped_control1: {"X": 1, "Z": 1},
+        mapped_control2: {"X": 1, "Z": 1},
+        mapped_target: {"X": 1, "Z": 1},
+    }
 
 
 def test_reaction_depth_propagates_kept_primitive_cliffords(movement_estimator) -> None:

@@ -57,9 +57,7 @@ class ResourceEstimator:
         """
         layout = copy.deepcopy(layout)
         layout.reset_graph()
-        reaction_depth: defaultdict[cirq.Qid, ReactionDepth] = defaultdict(
-            lambda: {"X": 0, "Z": 0}
-        )
+        reaction_depth: defaultdict[cirq.Qid, ReactionDepth] = defaultdict(lambda: {"X": 0, "Z": 0})
 
         for input_op in layout.mapped_circuit.all_operations():
             self._update_reaction_depth_for_logical_operation(
