@@ -103,7 +103,7 @@ def replace_cirq_op(
             lsp.Split(partitions=[1] * (len(path_patches[1:])), smooth=False).on(*path_patches[1:]),
         ]
     raise ValueError(
-        f"Invalid Op for {'transversal' if transversal_cnot else 'non-transversal'} CNOT: {op.gate}"
+        f"Invalid Op for {'transversal' if transversal_cnot else 'non-transversal'} gate: {op.gate}"
     )
 
 
