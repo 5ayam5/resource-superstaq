@@ -18,15 +18,15 @@ import pytest
 from numpy import isclose
 
 import resource_estimation.ftqc.architecture as arch
+import resource_estimation.ftqc.estimate as est
 import resource_estimation.ftqc.factory_specs as factory_specs
 import resource_estimation.ftqc.lattice_surgery_primitives as lsp
-from resource_estimation.ftqc.estimate import ResourceEstimator
 from resource_estimation.ftqc.layout import Column, MovementLayout
 
 
 @pytest.fixture
-def lattice_estimator() -> ResourceEstimator:
-    return ResourceEstimator(
+def lattice_estimator() -> est.ResourceEstimator:
+    return est.ResourceEstimator(
         arc=arch.DefaultLattice(
             d=5,
             idling=True,
@@ -38,8 +38,8 @@ def lattice_estimator() -> ResourceEstimator:
 
 
 @pytest.fixture
-def movement_estimator() -> ResourceEstimator:
-    return ResourceEstimator(
+def movement_estimator() -> est.ResourceEstimator:
+    return est.ResourceEstimator(
         arc=arch.DefaultMovement(
             d=5,
             idling=True,
@@ -54,7 +54,7 @@ def movement_estimator() -> ResourceEstimator:
 @pytest.mark.parametrize(
     "estimator",
     [
-        ResourceEstimator(
+        est.ResourceEstimator(
             arc=arch.DefaultMovement(
                 d=5,
                 idling=True,
@@ -64,7 +64,7 @@ def movement_estimator() -> ResourceEstimator:
                 syndrome_rounds=None,
             )
         ),
-        ResourceEstimator(
+        est.ResourceEstimator(
             arc=arch.DefaultLattice(
                 d=5,
                 idling=True,
@@ -207,7 +207,7 @@ def test_critical_path() -> None:
     c2 += cirq.S.on(q0)
     c2 += cirq.CNOT.on(q0, q1)
     arc = arch.DefaultMovement()
-    estim = ResourceEstimator(arc)
+    estim = est.ResourceEstimator(arc)
     # Should be identical aside from floating point errors
     assert isclose(estim.serial_circuit_time(c1), estim.serial_circuit_time(c2), atol=1e-5)
 
@@ -286,42 +286,6 @@ def test_reaction_depth_uses_explicit_non_auto_corrected_t_factory_spec(
     )
 
     assert movement_estimator.reaction_depth(layout) == {cirq.GridQubit(0, 0): {"X": 1, "Z": 1}}
-
-
-def test_reaction_depth_uses_explicit_auto_corrected_ccz_factory_spec(movement_estimator) -> None:
-    control1, control2, target = cirq.LineQubit.range(3)
-    layout = MovementLayout(
-        cirq.Circuit(cirq.CCZ(control1, control2, target)),
-        factory_specs={"ccz": factory_specs.CCZ_AUTO_CORRECTED_FACTORY_SPEC},
-    )
-    mapped_control1, mapped_control2, mapped_target = next(
-        iter(layout.mapped_circuit.all_operations())
-    ).qubits
-
-    assert movement_estimator.reaction_depth(layout) == {
-        mapped_control1: {"X": 0, "Z": 1},
-        mapped_control2: {"X": 0, "Z": 1},
-        mapped_target: {"X": 1, "Z": 0},
-    }
-
-
-def test_reaction_depth_uses_explicit_non_auto_corrected_ccz_factory_spec(
-    movement_estimator,
-) -> None:
-    control1, control2, target = cirq.LineQubit.range(3)
-    layout = MovementLayout(
-        cirq.Circuit(cirq.CCZ(control1, control2, target)),
-        factory_specs={"ccz": factory_specs.CCZ_NON_AUTO_CORRECTED_FACTORY_SPEC},
-    )
-    mapped_control1, mapped_control2, mapped_target = next(
-        iter(layout.mapped_circuit.all_operations())
-    ).qubits
-
-    assert movement_estimator.reaction_depth(layout) == {
-        mapped_control1: {"X": 1, "Z": 1},
-        mapped_control2: {"X": 1, "Z": 1},
-        mapped_target: {"X": 1, "Z": 1},
-    }
 
 
 def test_reaction_depth_propagates_kept_primitive_cliffords(movement_estimator) -> None:

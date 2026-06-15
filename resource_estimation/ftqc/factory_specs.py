@@ -107,49 +107,6 @@ def _s_reaction_dynamic(old_depths: ReactionDepthState) -> ReactionDepthState:
     return [{"X": old_depth.get("X", 0) + 1, "Z": old_depth.get("Z", 0) + 1}]
 
 
-def _ccz_auto_corrected_reaction_dynamic(_old_depths: ReactionDepthState) -> ReactionDepthState:
-    """Return reaction-depth updates for auto-corrected CCZ factories.
-
-    This assumes the auto-corrected circuit from How to Eat Magic States
-    (https://docs.google.com/presentation/d/1b0r3pKWi3_Bu64Rc5Ojc_9eVjWyZPWRP3-UBnqNdJB0).
-
-    Args:
-        _old_depths: Three-qubit reaction-depth state ordered as control1,
-            control2, target.
-
-    Returns:
-        Three positional qubit updates using the auto-corrected CCZ dynamics.
-    """
-    control1_old, control2_old, target_old = _old_depths
-    control1_new: ReactionDepth = {
-        "Z": max(control1_old.get("Z", 0), control2_old.get("X", 0) + 1, target_old.get("Z", 0) + 1)
-    }
-    control2_new: ReactionDepth = {
-        "Z": max(control2_old.get("Z", 0), control1_old.get("X", 0) + 1, target_old.get("Z", 0) + 1)
-    }
-    target_new: ReactionDepth = {
-        "X": max(
-            target_old.get("X", 0), control1_old.get("X", 0) + 1, control2_old.get("X", 0) + 1
-        ),
-    }
-
-    return [control1_new, control2_new, target_new]
-
-
-def _ccz_non_auto_corrected_reaction_dynamic(_old_depths: ReactionDepthState) -> ReactionDepthState:
-    """Return reaction-depth updates for non-auto-corrected CCZ factories.
-
-    Args:
-        _old_depths: Three-qubit reaction-depth state ordered as control1,
-            control2, target.
-
-    Returns:
-        Three positional qubit updates applying `newX = oldX + 1` and
-        `newZ = oldZ + 1` to each participating qubit.
-    """
-    return [{"X": depths.get("X", 0) + 1, "Z": depths.get("Z", 0) + 1} for depths in _old_depths]
-
-
 T_AUTO_CORRECTED_FACTORY_SPEC = FactorySpec(
     name="t-auto-corrected",
     ftype="t",
@@ -175,24 +132,6 @@ S_FACTORY_SPEC = FactorySpec(
     correction_policy=CorrectionPolicy(
         name="s",
         reaction_dynamic=_s_reaction_dynamic,
-    ),
-)
-CCZ_AUTO_CORRECTED_FACTORY_SPEC = FactorySpec(
-    name="ccz-auto-corrected",
-    ftype="ccz",
-    produced_gate=cirq.CCZ,
-    correction_policy=CorrectionPolicy(
-        name="ccz-auto-corrected",
-        reaction_dynamic=_ccz_auto_corrected_reaction_dynamic,
-    ),
-)
-CCZ_NON_AUTO_CORRECTED_FACTORY_SPEC = FactorySpec(
-    name="ccz-non-auto-corrected",
-    ftype="ccz",
-    produced_gate=cirq.CCZ,
-    correction_policy=CorrectionPolicy(
-        name="ccz-non-auto-corrected",
-        reaction_dynamic=_ccz_non_auto_corrected_reaction_dynamic,
     ),
 )
 
@@ -223,8 +162,6 @@ def default_factory_specs(
 
 
 __all__ = [
-    "CCZ_AUTO_CORRECTED_FACTORY_SPEC",
-    "CCZ_NON_AUTO_CORRECTED_FACTORY_SPEC",
     "CorrectionPolicy",
     "FactorySpec",
     "ReactionDepth",

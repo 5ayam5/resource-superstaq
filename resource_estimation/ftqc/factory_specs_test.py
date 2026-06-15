@@ -50,12 +50,6 @@ def test_factory_spec_stores_correction_metadata():
             "t",
             cirq.T,
         ),
-        (
-            factory_specs.CCZ_AUTO_CORRECTED_FACTORY_SPEC,
-            factory_specs.CCZ_NON_AUTO_CORRECTED_FACTORY_SPEC,
-            "ccz",
-            cirq.CCZ,
-        ),
     ],
 )
 def test_paired_standard_factory_specs(
@@ -93,22 +87,6 @@ def test_single_qubit_increment_both_reaction_dynamics(correction_policy):
     assert correction_policy.reaction_dynamic([{"X": 2, "Z": 5}]) == [{"X": 3, "Z": 6}]
 
 
-def test_ccz_non_auto_corrected_reaction_dynamic_increments_each_qubit():
-    old_depths = [
-        {"X": 0, "Z": 0},
-        {"X": 4, "Z": 5},
-        {"X": 7, "Z": 1},
-    ]
-
-    assert factory_specs.CCZ_NON_AUTO_CORRECTED_FACTORY_SPEC.correction_policy.reaction_dynamic(
-        old_depths
-    ) == [
-        {"X": 1, "Z": 1},
-        {"X": 5, "Z": 6},
-        {"X": 8, "Z": 2},
-    ]
-
-
 @pytest.mark.parametrize(
     ("old_depth", "expected_depth"),
     [
@@ -127,59 +105,6 @@ def test_s_reaction_dynamic_increments_both_bases():
     assert factory_specs.S_FACTORY_SPEC.correction_policy.reaction_dynamic([{"X": 2, "Z": 5}]) == [
         {"X": 3, "Z": 6}
     ]
-
-
-@pytest.mark.parametrize(
-    ("old_depths", "expected_depths"),
-    [
-        pytest.param(
-            [
-                {"X": 0, "Z": 10},
-                {"X": 0, "Z": 11},
-                {"X": 12, "Z": 0},
-            ],
-            [
-                {"Z": 10},
-                {"Z": 11},
-                {"X": 12},
-            ],
-            id="z1_z2_x3_existing_depths_win",
-        ),
-        pytest.param(
-            [
-                {"X": 10, "Z": 0},
-                {"X": 5, "Z": 0},
-                {"X": 0, "Z": 0},
-            ],
-            [
-                {"Z": 6},
-                {"Z": 11},
-                {"X": 11},
-            ],
-            id="z1_from_x2_z2_from_x1_x3_from_x1",
-        ),
-        pytest.param(
-            [
-                {"X": 0, "Z": 0},
-                {"X": 10, "Z": 0},
-                {"X": 0, "Z": 20},
-            ],
-            [
-                {"Z": 21},
-                {"Z": 21},
-                {"X": 11},
-            ],
-            id="z1_z2_from_z3_x3_from_x2",
-        ),
-    ],
-)
-def test_ccz_auto_corrected_reaction_dynamic_updates_controls_and_target(
-    old_depths, expected_depths
-):
-    assert (
-        factory_specs.CCZ_AUTO_CORRECTED_FACTORY_SPEC.correction_policy.reaction_dynamic(old_depths)
-        == expected_depths
-    )
 
 
 @pytest.mark.parametrize(
