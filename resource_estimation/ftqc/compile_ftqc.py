@@ -266,8 +266,7 @@ def post_op_syndrome_extraction(
             if op.gate in ops_to_correct or isinstance(op.gate, cirq.MeasurementGate)
         ]
         if qubits_to_correct:
-            correction_ops = syndrom_extract.on_each(*qubits_to_correct)
-            yield from correction_ops
+            yield from syndrom_extract.on_each(*qubits_to_correct)
 
             if with_barriers:
                 yield barrier
@@ -385,11 +384,7 @@ def ft_compile(
     else:
         validate_ops(circuit, verbose=verbose)
 
-    circuit = _decompose_to_primitives(
-        circuit=circuit,
-        layout=layout,
-        arc=arc,
-    )
+    circuit = _decompose_to_primitives(circuit, layout=layout, arc=arc)
     if verbose > 1:
         verbose_list = [list(moment.operations) for moment in circuit.moments]
 

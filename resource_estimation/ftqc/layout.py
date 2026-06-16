@@ -23,44 +23,17 @@ from typing import Literal
 import cirq
 import networkx as nx
 import numpy as np
-from typing_extensions import override
 
 
 @dataclass
 class Layout(abc.ABC):
-    """
-    Base class for fault-tolerant compiler layouts.
-
-    Attributes:
-        input_circuit: Logical input circuit to map onto the layout.
-        num_t_factories: Number of T factory patches requested for the layout.
-        num_s_factories: Number of S factory patches requested for the layout.
-        mapped_circuit: Input circuit after qubits are mapped to layout
-            `GridQubit`s by `_generate`.
-        layout_graph: Graph whose nodes are data, factory, and ancilla patches.
-            Factory nodes use `patch_type="factory"` and an `ftype` value.
-    """
+    """Base class for layouts used by the fault tolerant compiler to track factory use and CNOT routing"""
 
     input_circuit: cirq.Circuit
     num_t_factories: int = 0
     num_s_factories: int = 0
 
-    def __init__(
-        self,
-        input_circuit: cirq.Circuit,
-        num_t_factories: int = 0,
-        num_s_factories: int = 0,
-    ) -> None:
-        """Initialize layout state, graph placement, and qubit mapping.
-
-        Args:
-            input_circuit: Logical input circuit to map onto the layout.
-            num_t_factories: Number of T factory patches requested up front.
-            num_s_factories: Number of S factory patches requested up front.
-        """
-        self.input_circuit = input_circuit
-        self.num_t_factories = num_t_factories
-        self.num_s_factories = num_s_factories
+    def __post_init__(self) -> None:
         self.mapped_circuit = None
         self.layout_graph = None
         self._available_t_factories = deque()
@@ -239,32 +212,17 @@ class MovementLayout(Layout):
     """
 
     # TODO: build this implementation
-    @override
-    def __init__(
-        self,
-        input_circuit: cirq.Circuit,
-        num_t_factories: int = 1,
-    ) -> None:
-        """Initialize a movement layout with configurable T factories.
-
-        Args:
-            input_circuit: Logical input circuit to map onto the movement layout.
-            num_t_factories: Number of T factory patches to include.
-        """
+    def __init__(self, input_circuit: cirq.Circuit, num_t_factories: int = 1) -> None:
         super().__init__(
-            input_circuit=input_circuit,
-            num_t_factories=num_t_factories,
-            num_s_factories=0,
+            input_circuit=input_circuit, num_t_factories=num_t_factories, num_s_factories=0
         )
 
-    @override
     def route_cnot(self, ctrl: cirq.GridQubit, trgt: cirq.GridQubit):
         raise NotImplementedError
 
 
 class Column(Layout):
-    """
-    Lattice surgery Layout based on having two columns of logical qubits.
+    """Lattice surgery Layout based on having two columns of logical qubits
 
     S | a | q | a | q | a | S
     T | a | a | a | a | a | T
@@ -273,16 +231,7 @@ class Column(Layout):
     ...
     """
 
-    @override
-    def __init__(
-        self,
-        input_circuit: cirq.Circuit,
-    ) -> None:
-        """Initialize a column layout with T and S factories derived from width.
-
-        Args:
-            input_circuit: Logical input circuit to map onto the column layout.
-        """
+    def __init__(self, input_circuit: cirq.Circuit) -> None:
         rows = ceil(len(input_circuit.all_qubits()) / 2)
         num_s_factories = 2 * rows
         num_t_factories = 2 * rows
@@ -292,7 +241,6 @@ class Column(Layout):
             num_t_factories=num_t_factories,
         )
 
-    @override
     def _generate(self) -> None:
         """Places and assigns logical qubits according to the column configuration
         In the case where the number of logical qubits is odd fill the would-be logical qubit with an ancilla
@@ -344,8 +292,7 @@ class Column(Layout):
 
 
 class FactorySandwich(Layout):
-    """
-    Lattice surgery layout based on having a line of logical qubits sandwiched by factory qubits and ancilla.
+    """Lattice surgery layout based on having a line of logical qubits sandwiched by factory qubits and ancilla
 
     S | S | ... | S
     a | a | ... | a
@@ -361,7 +308,6 @@ class FactorySandwich(Layout):
     T | T | T | T
     """
 
-    @override
     def _generate(self) -> None:
         """Places and assigns logical qubits according to the Sandwich configuration"""
         qubit_map: dict[cirq.Qid, cirq.GridQubit] = {}
@@ -411,24 +357,10 @@ class Embedded(Layout):
     """
 
     # TODO: figure out a way o make the number of factories configurable
-    @override
-    def __init__(
-        self,
-        input_circuit: cirq.Circuit,
-    ) -> None:
-        """Initialize an embedded layout with generated T and S factory counts.
-
-        Args:
-            input_circuit: Logical input circuit to map onto the embedded layout.
-        """
+    def __init__(self, input_circuit: cirq.Circuit) -> None:
         # TODO: Find the formula for this
-        super().__init__(
-            input_circuit=input_circuit,
-            num_s_factories=0,
-            num_t_factories=0,
-        )
+        super().__init__(input_circuit=input_circuit, num_s_factories=0, num_t_factories=0)
 
-    @override
     def _generate(self) -> None:
         """Builds a large embedded logical qubit array by starting from a nearest neighbor array and adding rows/columns of other qubit types"""
         all_qubits = list(self.input_circuit.all_qubits())

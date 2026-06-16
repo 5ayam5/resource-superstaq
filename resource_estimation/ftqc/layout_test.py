@@ -13,6 +13,7 @@
 # limitations under the License.
 import cirq
 import pytest
+
 from resource_estimation.ftqc.layout import (
     Column,
     Embedded,

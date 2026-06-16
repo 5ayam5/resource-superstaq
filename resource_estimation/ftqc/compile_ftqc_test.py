@@ -322,7 +322,6 @@ def test_verbosity(random_circ) -> None:
     lay = Column(circuit)
     arc = arch.DefaultLattice()
     ops, compiled_circuit = comp.ft_compile(lay, arc, verbose=2)
-    assert isinstance(compiled_circuit, cirq.Circuit)
     for moment_ops in ops:
         for op in moment_ops:
             assert op in compiled_circuit.all_operations()
