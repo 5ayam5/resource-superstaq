@@ -31,7 +31,7 @@ from resource_estimation.ftqc.compile_ftqc import (
     validate_ops,
 )
 from resource_estimation.ftqc.distil import distil_15_to_1
-from resource_estimation.ftqc.estimate import ResourceEstimator
+from resource_estimation.ftqc.estimate import ReactionDepthEstimator, ResourceEstimator
 from resource_estimation.ftqc.lattice_surgery_primitives import (
     BufferCodePatch,
     Cultivate,
@@ -77,6 +77,7 @@ __all__ = [
     "MeasureZonesOnly",
     "MovementLayout",
     "Move",
+    "ReactionDepthEstimator",
     "ResourceEstimator",
     "RotatedCodePatch",
     "Split",

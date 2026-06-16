@@ -19,9 +19,7 @@ from numpy import isclose
 
 import resource_estimation.ftqc.architecture as arch
 import resource_estimation.ftqc.estimate as est
-import resource_estimation.ftqc.factory_specs as factory_specs
 import resource_estimation.ftqc.lattice_surgery_primitives as lsp
-from resource_estimation.ftqc.layout import Column, MovementLayout
 
 
 @pytest.fixture
@@ -261,145 +259,116 @@ def test_physical_qubit_count(lattice_estimator) -> None:
     assert num_physical_qubits == expected_num_physical_qubits
 
 
-def test_reaction_depth_uses_layout_default_factory_specs(movement_estimator) -> None:
+def test_reaction_depth_uses_default_auto_corrected_t_factory() -> None:
     qubit = cirq.LineQubit(0)
-    layout = MovementLayout(cirq.Circuit(cirq.T(qubit)), num_t_factories=1)
+    reaction_depth_estimator = est.ReactionDepthEstimator()
 
-    assert movement_estimator.reaction_depth(layout) == {cirq.GridQubit(0, 0): {"X": 0, "Z": 1}}
+    assert reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.T(qubit))) == {
+        qubit: {"X": 0, "Z": 1}
+    }
 
 
-def test_reaction_depth_uses_layout_default_s_factory_spec(lattice_estimator) -> None:
+def test_reaction_depth_uses_default_s_factory() -> None:
     qubit = cirq.LineQubit(0)
-    layout = Column(cirq.Circuit(cirq.S(qubit)))
-    mapped_qubit = next(iter(layout.mapped_circuit.all_operations())).qubits[0]
+    reaction_depth_estimator = est.ReactionDepthEstimator()
 
-    assert lattice_estimator.reaction_depth(layout) == {mapped_qubit: {"X": 1, "Z": 1}}
+    assert reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.S(qubit))) == {
+        qubit: {"X": 1, "Z": 1}
+    }
 
 
-def test_reaction_depth_uses_explicit_non_auto_corrected_t_factory_spec(
-    movement_estimator,
-) -> None:
+def test_reaction_depth_uses_explicit_non_auto_corrected_t_factory() -> None:
     qubit = cirq.LineQubit(0)
-    layout = MovementLayout(
-        cirq.Circuit(cirq.T(qubit)),
-        factory_specs={"t": factory_specs.T_NON_AUTO_CORRECTED_FACTORY_SPEC},
+    reaction_depth_estimator = est.ReactionDepthEstimator(
+        factories={cirq.T: False},
     )
 
-    assert movement_estimator.reaction_depth(layout) == {cirq.GridQubit(0, 0): {"X": 1, "Z": 1}}
+    assert reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.T(qubit))) == {
+        qubit: {"X": 1, "Z": 1}
+    }
 
 
-def test_reaction_depth_propagates_kept_primitive_cliffords(movement_estimator) -> None:
+def test_reaction_depth_factory_dict_keys_define_factory_gates() -> None:
     qubit = cirq.LineQubit(0)
-    layout = MovementLayout(cirq.Circuit(cirq.T(qubit), cirq.H(qubit)), num_t_factories=1)
+    reaction_depth_estimator = est.ReactionDepthEstimator(factories={})
 
-    assert movement_estimator.reaction_depth(layout) == {cirq.GridQubit(0, 0): {"X": 1, "Z": 0}}
+    with pytest.raises(ValueError, match="non-Clifford operation without a factory dynamic"):
+        reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.T(qubit)))
 
 
-def test_reaction_depth_splits_y_from_s_clifford(movement_estimator) -> None:
+@pytest.mark.parametrize("factories", [{cirq.S: True}, {cirq.CCZ: True}])
+def test_reaction_depth_rejects_undefined_factory_corrections(
+    factories,
+) -> None:
+    with pytest.raises(ValueError, match="No reaction-depth factory dynamic is defined"):
+        est.ReactionDepthEstimator(factories=factories)
+
+
+def test_reaction_depth_rejects_wrong_arity_factory_dynamic(
+    monkeypatch,
+) -> None:
     qubit = cirq.LineQubit(0)
-    layout = MovementLayout(cirq.Circuit(cirq.T(qubit), cirq.H(qubit), cirq.S(qubit)))
+    reaction_depth_estimator = est.ReactionDepthEstimator()
+    monkeypatch.setitem(est._FACTORY_REACTION_DYNAMICS, (cirq.T, True), lambda old_depths: [])
 
-    assert movement_estimator.reaction_depth(layout) == {cirq.GridQubit(0, 0): {"X": 1, "Z": 1}}
+    with pytest.raises(ValueError, match="returned 0 updates for 1 qubits"):
+        reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.T(qubit)))
 
 
-def test_reaction_depth_propagates_cnot_clifford_products(movement_estimator) -> None:
+def test_reaction_depth_propagates_kept_primitive_cliffords() -> None:
+    qubit = cirq.LineQubit(0)
+    reaction_depth_estimator = est.ReactionDepthEstimator()
+
+    assert reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.T(qubit), cirq.H(qubit))) == {
+        qubit: {"X": 1, "Z": 0}
+    }
+
+
+def test_reaction_depth_splits_y_from_s_clifford() -> None:
+    qubit = cirq.LineQubit(0)
+    reaction_depth_estimator = est.ReactionDepthEstimator(factories={cirq.T: True})
+
+    assert reaction_depth_estimator.reaction_depth(
+        cirq.Circuit(cirq.T(qubit), cirq.H(qubit), cirq.S(qubit))
+    ) == {qubit: {"X": 1, "Z": 1}}
+
+
+def test_reaction_depth_propagates_cnot_clifford_products() -> None:
     control, target = cirq.LineQubit.range(2)
-    layout = MovementLayout(
+    reaction_depth_estimator = est.ReactionDepthEstimator()
+
+    assert reaction_depth_estimator.reaction_depth(
         cirq.Circuit(
             cirq.T(control),
             cirq.T(target),
             cirq.H(control),
             cirq.CNOT(control, target),
         )
-    )
-
-    assert movement_estimator.reaction_depth(layout) == {
-        cirq.GridQubit(0, 0): {"X": 1, "Z": 1},
-        cirq.GridQubit(0, 1): {"X": 1, "Z": 1},
+    ) == {
+        control: {"X": 1, "Z": 1},
+        target: {"X": 1, "Z": 1},
     }
 
 
-def test_reaction_depth_clears_source_axes_when_clifford_moves_them(movement_estimator) -> None:
+def test_reaction_depth_clears_source_axes_when_clifford_moves_them() -> None:
     q0, q1 = cirq.LineQubit.range(2)
-    layout = MovementLayout(cirq.Circuit(cirq.T(q0), cirq.SWAP(q0, q1)))
+    reaction_depth_estimator = est.ReactionDepthEstimator()
 
-    assert movement_estimator.reaction_depth(layout) == {
-        cirq.GridQubit(0, 0): {"X": 0, "Z": 0},
-        cirq.GridQubit(0, 1): {"X": 0, "Z": 1},
+    assert reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.T(q0), cirq.SWAP(q0, q1))) == {
+        q0: {"X": 0, "Z": 0},
+        q1: {"X": 0, "Z": 1},
     }
 
 
-def test_reaction_depth_applies_custom_factory_dynamic_once(movement_estimator) -> None:
-    qubit = cirq.LineQubit(0)
-    calls = 0
+def test_reaction_depth_rejects_non_factory_non_clifford() -> None:
+    q0, q1, q2 = cirq.LineQubit.range(3)
+    reaction_depth_estimator = est.ReactionDepthEstimator()
 
-    def reaction_dynamic(
-        old_depths: factory_specs.ReactionDepthState,
-    ) -> factory_specs.ReactionDepthState:
-        nonlocal calls
-        calls += 1
-        old_depth = old_depths[0]
-        return [{"Z": old_depth.get("Z", 0) + 1}]
-
-    factory_spec = factory_specs.FactorySpec(
-        name="counting-t",
-        ftype="t",
-        produced_gate=cirq.T,
-        correction_policy=factory_specs.CorrectionPolicy(
-            name="counting-correction",
-            reaction_dynamic=reaction_dynamic,
-        ),
-    )
-    layout = MovementLayout(
-        cirq.Circuit(cirq.T(qubit)),
-        num_t_factories=1,
-        factory_specs={"t": factory_spec},
-    )
-
-    assert movement_estimator.reaction_depth(layout) == {cirq.GridQubit(0, 0): {"X": 0, "Z": 1}}
-    assert calls == 1
+    with pytest.raises(ValueError, match="non-Clifford operation without a factory dynamic"):
+        reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.CCZ(q0, q1, q2)))
 
 
-def test_reaction_depth_rejects_wrong_arity_factory_dynamic(movement_estimator) -> None:
-    qubit = cirq.LineQubit(0)
-
-    def reaction_dynamic(
-        old_depths: factory_specs.ReactionDepthState,
-    ) -> factory_specs.ReactionDepthState:
-        return []
-
-    factory_spec = factory_specs.FactorySpec(
-        name="bad-t",
-        ftype="t",
-        produced_gate=cirq.T,
-        correction_policy=factory_specs.CorrectionPolicy(
-            name="bad-correction",
-            reaction_dynamic=reaction_dynamic,
-        ),
-    )
-    layout = MovementLayout(
-        cirq.Circuit(cirq.T(qubit)),
-        num_t_factories=1,
-        factory_specs={"t": factory_spec},
-    )
-
-    with pytest.raises(ValueError, match="returned 0 updates for 1 qubits"):
-        movement_estimator.reaction_depth(layout)
-
-
-def test_reaction_depth_rejects_non_factory_non_clifford(movement_estimator) -> None:
-    qubit = cirq.LineQubit(0)
-    layout = MovementLayout(
-        cirq.Circuit(cirq.T(qubit)),
-        num_t_factories=1,
-        factory_specs={},
-    )
-
-    with pytest.raises(ValueError, match="non-Clifford operation without a factory spec"):
-        movement_estimator.reaction_depth(layout)
-
-
-def test_reaction_depth_wraps_clifford_conjugation_errors(movement_estimator, monkeypatch) -> None:
+def test_reaction_depth_wraps_clifford_conjugation_errors(monkeypatch) -> None:
     def raise_conjugation_error(
         self: cirq.PauliString,
         input_op: cirq.Operation,
@@ -407,8 +376,8 @@ def test_reaction_depth_wraps_clifford_conjugation_errors(movement_estimator, mo
         raise ValueError("cannot conjugate")
 
     qubit = cirq.LineQubit(0)
-    layout = MovementLayout(cirq.Circuit(cirq.T(qubit), cirq.H(qubit)), num_t_factories=1)
+    reaction_depth_estimator = est.ReactionDepthEstimator()
     monkeypatch.setattr(cirq.PauliString, "conjugated_by", raise_conjugation_error)
 
-    with pytest.raises(ValueError, match="non-Clifford operation without a factory spec"):
-        movement_estimator.reaction_depth(layout)
+    with pytest.raises(ValueError, match="non-Clifford operation without a factory dynamic"):
+        reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.T(qubit), cirq.H(qubit)))

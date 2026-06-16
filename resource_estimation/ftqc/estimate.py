@@ -13,24 +13,16 @@
 # limitations under the License.
 from __future__ import annotations
 
-import copy
 import warnings
 from collections import Counter, defaultdict
-from typing import TYPE_CHECKING
-
-import cirq
-
-from resource_estimation.ftqc.factory_specs import ReactionDepth
-from resource_estimation.ftqc.layout import Layout
-
-if TYPE_CHECKING:
-    from resource_estimation.ftqc.architecture import Architecture
-
-import warnings
-from collections import Counter
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Literal
 
 import cirq
 from tqdm import tqdm
+
+if TYPE_CHECKING:
+    from resource_estimation.ftqc.architecture import Architecture
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
@@ -40,126 +32,6 @@ class ResourceEstimator:
 
     def __init__(self, arc: Architecture) -> None:
         self.arc = arc
-
-    def reaction_depth(self, layout: Layout) -> dict[cirq.Qid, ReactionDepth]:
-        """Compute reaction depth for the logical operation stream of a layout.
-
-        Reaction depth is a logical post-processing metric: it uses the mapped
-        logical circuit and the layout's static `factory_specs`, not the compiled
-        primitive circuit. The layout is copied and reset before analysis so this
-        method does not consume factories or mutate caller-owned layout state.
-
-        Args:
-            layout: Layout containing the logical circuit and factory specs to
-                use for reaction-depth dynamics.
-
-        Returns:
-            Per-qubit reaction-depth state. Each value contains the current `"X"`
-            and `"Z"` reaction depths for that logical qubit.
-        """
-        layout = copy.deepcopy(layout)
-        layout.reset_graph()
-        reaction_depth: defaultdict[cirq.Qid, ReactionDepth] = defaultdict(lambda: {"X": 0, "Z": 0})
-
-        for input_op in layout.mapped_circuit.all_operations():
-            self._update_reaction_depth_for_logical_operation(
-                input_op=input_op,
-                layout=layout,
-                reaction_depth=reaction_depth,
-            )
-
-        return {qubit: dict(depth) for qubit, depth in reaction_depth.items()}
-
-    def _update_reaction_depth_for_logical_operation(
-        self,
-        input_op: cirq.Operation,
-        layout: Layout,
-        reaction_depth: defaultdict[cirq.Qid, ReactionDepth],
-    ) -> None:
-        """Apply one logical operation to accumulated reaction-depth state.
-
-        Args:
-            input_op: Logical operation from `layout.mapped_circuit`.
-            layout: Layout whose `factory_specs` map defines factory-backed
-                reaction dynamics.
-            reaction_depth: Mutable per-qubit reaction-depth state to update.
-
-        Raises:
-            ValueError: If a factory dynamic returns the wrong number of qubit
-                updates, or if a non-factory operation is not Clifford.
-        """
-        factory_type = "" if input_op.gate is None else str(input_op.gate).lower()
-        factory_spec = layout.factory_specs.get(factory_type)
-        if factory_spec is None:
-            self._apply_clifford_reaction_depth(input_op, reaction_depth)
-            return
-
-        reaction_dynamic = factory_spec.correction_policy.reaction_dynamic
-        old_depths = [dict(reaction_depth[qubit]) for qubit in input_op.qubits]
-        new_depths = reaction_dynamic(old_depths)
-        if len(new_depths) != len(input_op.qubits):
-            raise ValueError(
-                "Reaction dynamic returned "
-                f"{len(new_depths)} updates for {len(input_op.qubits)} qubits."
-            )
-        for qubit, new_depth in zip(input_op.qubits, new_depths, strict=True):
-            reaction_depth[qubit].update(new_depth)
-
-    def _apply_clifford_reaction_depth(
-        self,
-        input_op: cirq.Operation,
-        reaction_depth: defaultdict[cirq.Qid, ReactionDepth],
-    ) -> None:
-        """Propagate tracked Pauli reaction depths through a Clifford operation.
-
-        Args:
-            input_op: Non-factory operation to treat as a Clifford.
-            reaction_depth: Mutable per-qubit reaction-depth state to update.
-
-        Raises:
-            ValueError: If `input_op` is not Clifford in the supported Cirq
-                model.
-        """
-        non_clifford_message = (
-            "Reaction-depth metric encountered a non-Clifford operation without a "
-            f"factory spec: {input_op!r}. Add a matching factory spec to "
-            "`layout.factory_specs` to define its reaction dynamics."
-        )
-        if input_op.gate is None or not cirq.has_stabilizer_effect(input_op.gate):
-            raise ValueError(non_clifford_message)
-
-        old_depths: dict[cirq.Qid, ReactionDepth] = {}
-        new_depths: defaultdict[cirq.Qid, ReactionDepth] = defaultdict(lambda: {"X": 0, "Z": 0})
-        for qubit in input_op.qubits:
-            old_depth = reaction_depth.get(qubit)
-            if old_depth is None or not any(old_depth.values()):
-                continue
-            old_depths[qubit] = dict(old_depth)
-            new_depths[qubit] = {"X": 0, "Z": 0}
-
-        for source_qubit, source_depth in old_depths.items():
-            for source_basis, depth in source_depth.items():
-                source_pauli = cirq.PauliString(
-                    cirq.X(source_qubit) if source_basis == "X" else cirq.Z(source_qubit)
-                )
-                try:
-                    propagated_pauli = source_pauli.conjugated_by(input_op)
-                except ValueError as exc:
-                    raise ValueError(non_clifford_message) from exc
-
-                for target_qubit in propagated_pauli.qubits:
-                    target_pauli = propagated_pauli.get(target_qubit)
-                    target_bases = {
-                        cirq.X: ("X",),
-                        cirq.Z: ("Z",),
-                        cirq.Y: ("X", "Z"),
-                    }[target_pauli]
-                    target_depth = new_depths[target_qubit]
-                    for target_basis in target_bases:
-                        target_depth[target_basis] = max(target_depth[target_basis], depth)
-
-        for qubit, new_depth in new_depths.items():
-            reaction_depth[qubit].update(new_depth)
 
     def validate_circuit_ops(self, circuit: cirq.Circuit) -> None:
         """Checks that the input circuit contains only valid operations and warns of operations still in progress"""
@@ -277,3 +149,192 @@ class ResourceEstimator:
     def physical_qubits(self, circuit: cirq.Circuit) -> int:
         """Calculates the physical qubit cost of the requested circuit"""
         return cirq.num_qubits(circuit) * self.arc.patch.num_physical_qubits
+
+
+ReactionDepth = dict[Literal["X", "Z"], int]
+_ReactionDepthState = list[ReactionDepth]
+_ReactionDynamic = Callable[[_ReactionDepthState], _ReactionDepthState]
+
+
+def _t_auto_corrected_reaction_dynamic(old_depths: _ReactionDepthState) -> _ReactionDepthState:
+    """Return reaction-depth updates for auto-corrected T factories.
+
+    Args:
+        old_depths: Single-qubit reaction-depth state before the T correction.
+
+    Returns:
+        Single-qubit update applying `newZ = max(oldZ, oldX + 1)`.
+    """
+    old_depth = old_depths[0]
+    return [{"Z": max(old_depth.get("X", 0) + 1, old_depth.get("Z", 0))}]
+
+
+def _t_non_auto_corrected_reaction_dynamic(
+    old_depths: _ReactionDepthState,
+) -> _ReactionDepthState:
+    """Return reaction-depth updates for non-auto-corrected T factories.
+
+    Args:
+        old_depths: Single-qubit reaction-depth state before the T correction.
+
+    Returns:
+        Single-qubit update applying `newX = oldX + 1` and `newZ = oldZ + 1`.
+    """
+    old_depth = old_depths[0]
+    return [{"X": old_depth.get("X", 0) + 1, "Z": old_depth.get("Z", 0) + 1}]
+
+
+def _s_reaction_dynamic(old_depths: _ReactionDepthState) -> _ReactionDepthState:
+    """Return reaction-depth updates for standard S factories.
+
+    Args:
+        old_depths: Single-qubit reaction-depth state before the S correction.
+
+    Returns:
+        Single-qubit update applying `newX = oldX + 1` and `newZ = oldZ + 1`.
+    """
+    old_depth = old_depths[0]
+    return [{"X": old_depth.get("X", 0) + 1, "Z": old_depth.get("Z", 0) + 1}]
+
+
+_FACTORY_REACTION_DYNAMICS: dict[tuple[cirq.Gate, bool], _ReactionDynamic] = {
+    (cirq.T, True): _t_auto_corrected_reaction_dynamic,
+    (cirq.T, False): _t_non_auto_corrected_reaction_dynamic,
+    (cirq.S, False): _s_reaction_dynamic,
+}
+
+
+class ReactionDepthEstimator:
+    """Estimator for logical reaction depth in a Clifford+factory circuit.
+
+    The factory map defines which gates are factory-backed. Operations whose
+    gates are absent from that map are treated as Clifford operations and
+    propagate tracked Pauli reaction depths.
+
+    Attributes:
+        factories: Gate-to-bool map selecting factory-backed gates and whether
+            each factory dynamic is auto-corrected (`True`) or
+            non-auto-corrected (`False`).
+    """
+
+    def __init__(
+        self,
+        factories: dict[cirq.Gate, bool] | None = None,
+    ) -> None:
+        """Initialize reaction-depth dynamics for a factory-backed gate set.
+
+        Args:
+            factories: Optional gate-to-bool map. Each key is treated as a
+                factory-backed gate, and each value selects auto-corrected
+                (`True`) or non-auto-corrected (`False`) dynamics. When omitted,
+                defaults are T auto-corrected and S non-auto-corrected.
+
+        Raises:
+            ValueError: If any supplied `(gate, auto_corrected)` pair has no
+                defined reaction dynamic.
+        """
+        if factories is None:
+            self.factories = {cirq.T: True, cirq.S: False}
+        else:
+            self.factories = factories
+
+        unsupported_pairs = [
+            (gate, auto_corrected)
+            for gate, auto_corrected in self.factories.items()
+            if (gate, auto_corrected) not in _FACTORY_REACTION_DYNAMICS
+        ]
+        if unsupported_pairs:
+            raise ValueError(
+                "No reaction-depth factory dynamic is defined for: "
+                + ", ".join(
+                    f"({gate!r}, {auto_corrected!r})" for gate, auto_corrected in unsupported_pairs
+                )
+            )
+
+    def reaction_depth(self, circuit: cirq.Circuit) -> dict[cirq.Qid, ReactionDepth]:
+        """Compute reaction depth for a logical circuit.
+
+        Args:
+            circuit: Logical circuit whose factory-backed operations and
+                Clifford propagation should be tracked.
+
+        Returns:
+            Per-qubit reaction-depth state keyed by the original circuit qubits.
+            Each value contains the current `"X"` and `"Z"` reaction depths.
+        """
+        reaction_depth: defaultdict[cirq.Qid, ReactionDepth] = defaultdict(lambda: {"X": 0, "Z": 0})
+
+        for input_op in circuit.all_operations():
+            if input_op.gate not in self.factories:
+                self._apply_clifford_reaction_depth(input_op, reaction_depth)
+                continue
+
+            reaction_dynamic = _FACTORY_REACTION_DYNAMICS[
+                (input_op.gate, self.factories[input_op.gate])
+            ]
+            old_depths = [dict(reaction_depth[qubit]) for qubit in input_op.qubits]
+            new_depths = reaction_dynamic(old_depths)
+            if len(new_depths) != len(input_op.qubits):
+                raise ValueError(
+                    "Reaction dynamic returned "
+                    f"{len(new_depths)} updates for {len(input_op.qubits)} qubits."
+                )
+            for qubit, new_depth in zip(input_op.qubits, new_depths, strict=True):
+                reaction_depth[qubit].update(new_depth)
+
+        return {qubit: dict(depth) for qubit, depth in reaction_depth.items()}
+
+    def _apply_clifford_reaction_depth(
+        self,
+        input_op: cirq.Operation,
+        reaction_depth: defaultdict[cirq.Qid, ReactionDepth],
+    ) -> None:
+        """Propagate tracked Pauli reaction depths through a Clifford operation.
+
+        Args:
+            input_op: Non-factory operation to treat as a Clifford.
+            reaction_depth: Mutable per-qubit reaction-depth state to update.
+
+        Raises:
+            ValueError: If `input_op` is not Clifford in the supported Cirq
+                model.
+        """
+        non_clifford_message = (
+            "Reaction-depth estimator encountered a non-Clifford operation without a "
+            f"factory dynamic: {input_op!r}."
+        )
+        if not cirq.has_stabilizer_effect(input_op.gate):
+            raise ValueError(non_clifford_message)
+
+        old_depths: dict[cirq.Qid, ReactionDepth] = {}
+        new_depths: defaultdict[cirq.Qid, ReactionDepth] = defaultdict(lambda: {"X": 0, "Z": 0})
+        for qubit in input_op.qubits:
+            old_depth = reaction_depth.get(qubit, {"X": 0, "Z": 0})
+            if not any(old_depth.values()):
+                continue
+            old_depths[qubit] = dict(old_depth)
+            new_depths[qubit] = {"X": 0, "Z": 0}
+
+        for source_qubit, source_depth in old_depths.items():
+            for source_basis, depth in source_depth.items():
+                source_pauli = cirq.PauliString(
+                    cirq.X(source_qubit) if source_basis == "X" else cirq.Z(source_qubit)
+                )
+                try:
+                    propagated_pauli = source_pauli.conjugated_by(input_op)
+                except ValueError as exc:
+                    raise ValueError(non_clifford_message) from exc
+
+                for target_qubit in propagated_pauli.qubits:
+                    target_pauli = propagated_pauli.get(target_qubit)
+                    target_bases = {
+                        cirq.X: ("X",),
+                        cirq.Z: ("Z",),
+                        cirq.Y: ("X", "Z"),
+                    }[target_pauli]
+                    target_depth = new_depths[target_qubit]
+                    for target_basis in target_bases:
+                        target_depth[target_basis] = max(target_depth[target_basis], depth)
+
+        for qubit, new_depth in new_depths.items():
+            reaction_depth[qubit].update(new_depth)

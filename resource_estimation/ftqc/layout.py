@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import abc
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import combinations, product
 from math import ceil, sqrt
 from typing import Literal
@@ -24,8 +24,6 @@ import cirq
 import networkx as nx
 import numpy as np
 from typing_extensions import override
-
-from .factory_specs import FactorySpec, default_factory_specs
 
 
 @dataclass
@@ -37,9 +35,6 @@ class Layout(abc.ABC):
         input_circuit: Logical input circuit to map onto the layout.
         num_t_factories: Number of T factory patches requested for the layout.
         num_s_factories: Number of S factory patches requested for the layout.
-        factory_specs: Static factory metadata keyed by `ftype`. When omitted
-            at construction time, layouts use default specs for the
-            factory types they contain. Explicit dictionaries replace defaults.
         mapped_circuit: Input circuit after qubits are mapped to layout
             `GridQubit`s by `_generate`.
         layout_graph: Graph whose nodes are data, factory, and ancilla patches.
@@ -49,45 +44,29 @@ class Layout(abc.ABC):
     input_circuit: cirq.Circuit
     num_t_factories: int = 0
     num_s_factories: int = 0
-    factory_specs: dict[str, FactorySpec] = field(init=False)
 
     def __init__(
         self,
         input_circuit: cirq.Circuit,
         num_t_factories: int = 0,
         num_s_factories: int = 0,
-        factory_specs: dict[str, FactorySpec] | None = None,
     ) -> None:
-        """Initialize layout state, graph placement, and factory spec metadata.
-
-        Defaults are resolved after `_generate()` so layouts that compute their
-        factory counts during graph generation still receive matching default
-        specs.
+        """Initialize layout state, graph placement, and qubit mapping.
 
         Args:
             input_circuit: Logical input circuit to map onto the layout.
             num_t_factories: Number of T factory patches requested up front.
             num_s_factories: Number of S factory patches requested up front.
-            factory_specs: Optional full factory spec map. When omitted, the
-                layout uses default specs for the factory types it contains.
-                When provided, the dictionary replaces those defaults and is
-                copied before storage.
         """
         self.input_circuit = input_circuit
         self.num_t_factories = num_t_factories
         self.num_s_factories = num_s_factories
-        self.factory_specs = {}
         self.mapped_circuit = None
         self.layout_graph = None
         self._available_t_factories = deque()
         self._available_s_factories = deque()
         self._all_factories = set()
         self._generate()
-        self.factory_specs = (
-            default_factory_specs(self.num_t_factories, self.num_s_factories)
-            if factory_specs is None
-            else dict(factory_specs)  # to copy the dict
-        )
 
     def set_map_circuit(self, qubit_map: dict[cirq.Qid, cirq.GridQubit]) -> None:
         """Apply a given mapping from qubits in the input circuit to GridQubits used for compilation"""
@@ -265,22 +244,17 @@ class MovementLayout(Layout):
         self,
         input_circuit: cirq.Circuit,
         num_t_factories: int = 1,
-        factory_specs: dict[str, FactorySpec] | None = None,
     ) -> None:
         """Initialize a movement layout with configurable T factories.
 
         Args:
             input_circuit: Logical input circuit to map onto the movement layout.
             num_t_factories: Number of T factory patches to include.
-            factory_specs: Optional full factory spec map. When omitted, the
-                layout uses the auto-corrected T spec for positive
-                `num_t_factories`. When provided, it replaces defaults.
         """
         super().__init__(
             input_circuit=input_circuit,
             num_t_factories=num_t_factories,
             num_s_factories=0,
-            factory_specs=factory_specs,
         )
 
     @override
@@ -291,10 +265,6 @@ class MovementLayout(Layout):
 class Column(Layout):
     """
     Lattice surgery Layout based on having two columns of logical qubits.
-
-    When `factory_specs` is omitted, it defaults to the auto-corrected T spec
-    and the standard S spec because the column layout contains both factory
-    types.
 
     S | a | q | a | q | a | S
     T | a | a | a | a | a | T
@@ -307,15 +277,11 @@ class Column(Layout):
     def __init__(
         self,
         input_circuit: cirq.Circuit,
-        factory_specs: dict[str, FactorySpec] | None = None,
     ) -> None:
         """Initialize a column layout with T and S factories derived from width.
 
         Args:
             input_circuit: Logical input circuit to map onto the column layout.
-            factory_specs: Optional full factory spec map. When omitted, the
-                layout uses the auto-corrected T spec and standard S spec.
-                When provided, it replaces defaults.
         """
         rows = ceil(len(input_circuit.all_qubits()) / 2)
         num_s_factories = 2 * rows
@@ -324,7 +290,6 @@ class Column(Layout):
             input_circuit=input_circuit,
             num_s_factories=num_s_factories,
             num_t_factories=num_t_factories,
-            factory_specs=factory_specs,
         )
 
     @override
@@ -381,9 +346,6 @@ class Column(Layout):
 class FactorySandwich(Layout):
     """
     Lattice surgery layout based on having a line of logical qubits sandwiched by factory qubits and ancilla.
-
-    This class uses the base `Layout` constructor. When `factory_specs` is
-    omitted, defaults are chosen from the configured T and S factory counts.
 
     S | S | ... | S
     a | a | ... | a
@@ -443,8 +405,6 @@ class Embedded(Layout):
     """Lattice surgery layout based on packing logical qubits into a rectangle with ancilla patches forming gaps between them
     Without the ancilla patches, the logical qubits would be nearest neighbor
     Factories surround the main array, alternating between S and T designation
-    When `factory_specs` is omitted, defaults are chosen after generation from
-    the T and S factory counts discovered by this layout.
     This Layout currently cannot increase/decrease the number of factories of either type
     The inspiration for this layout was a conversation with Ben, where he described the output of the MCM compiler being nearest-neighbor connectivity
     So I wanted a Layout that could potentially be compatible with that kind of output
@@ -455,22 +415,17 @@ class Embedded(Layout):
     def __init__(
         self,
         input_circuit: cirq.Circuit,
-        factory_specs: dict[str, FactorySpec] | None = None,
     ) -> None:
         """Initialize an embedded layout with generated T and S factory counts.
 
         Args:
             input_circuit: Logical input circuit to map onto the embedded layout.
-            factory_specs: Optional full factory spec map. When omitted, the
-                layout uses default specs for the generated factory types.
-                When provided, it replaces defaults.
         """
         # TODO: Find the formula for this
         super().__init__(
             input_circuit=input_circuit,
             num_s_factories=0,
             num_t_factories=0,
-            factory_specs=factory_specs,
         )
 
     @override
