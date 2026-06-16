@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from __future__ import annotations
-
 import abc
 from collections import deque
 from dataclasses import dataclass
@@ -223,7 +222,6 @@ class MovementLayout(Layout):
 
 class Column(Layout):
     """Lattice surgery Layout based on having two columns of logical qubits
-
     S | a | q | a | q | a | S
     T | a | a | a | a | a | T
     S | a | q | a | q | a | S
@@ -293,7 +291,6 @@ class Column(Layout):
 
 class FactorySandwich(Layout):
     """Lattice surgery layout based on having a line of logical qubits sandwiched by factory qubits and ancilla
-
     S | S | ... | S
     a | a | ... | a
     q | q | ... | q
