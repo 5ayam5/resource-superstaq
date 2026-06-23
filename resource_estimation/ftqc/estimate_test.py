@@ -315,8 +315,103 @@ def test_reaction_depth_rejects_wrong_arity_factory_dynamic(
         lambda old_depths: [],
     )
 
-    with pytest.raises(ValueError, match="returned 0 updates for 1 qubits"):
-        reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.T(qubit)))
+    with pytest.raises(IndexError):
+        est.ReactionDepthEstimator().reaction_depth(cirq.Circuit(cirq.T(qubit)))
+
+
+@pytest.mark.parametrize(
+    "circuit",
+    [
+        cirq.Circuit(cirq.T(cirq.LineQubit(0)), cirq.H(cirq.LineQubit(0))),
+        cirq.Circuit(
+            cirq.T(cirq.LineQubit(0)),
+            cirq.H(cirq.LineQubit(0)),
+            cirq.S(cirq.LineQubit(0)),
+        ),
+        cirq.Circuit(
+            cirq.T(cirq.LineQubit(0)),
+            cirq.T(cirq.LineQubit(1)),
+            cirq.H(cirq.LineQubit(0)),
+            cirq.CNOT(cirq.LineQubit(0), cirq.LineQubit(1)),
+        ),
+    ],
+)
+def test_reaction_tree_frontier_depths_match_reaction_depth(circuit: cirq.Circuit) -> None:
+    reaction_depth_estimator = est.ReactionDepthEstimator()
+    reaction_depth = reaction_depth_estimator.reaction_depth(circuit)
+    reaction_tree = reaction_depth_estimator.reaction_tree(circuit)
+
+    for qubit, depth in reaction_depth.items():
+        assert reaction_tree.depths[reaction_tree.frontier[(qubit, "X")]] == depth["X"]
+        assert reaction_tree.depths[reaction_tree.frontier[(qubit, "Z")]] == depth["Z"]
+
+
+def test_reaction_tree_rejects_non_factory_non_clifford() -> None:
+    q0, q1, q2 = cirq.LineQubit.range(3)
+    reaction_depth_estimator = est.ReactionDepthEstimator()
+
+    with pytest.raises(ValueError, match="non-Clifford operation without a factory dynamic"):
+        reaction_depth_estimator.reaction_tree(cirq.Circuit(cirq.CCZ(q0, q1, q2)))
+
+
+def test_reaction_tree_tracks_pauli_product_factory_regression(monkeypatch) -> None:
+    q0, q1 = cirq.LineQubit.range(2)
+    pauli_product = cirq.PauliStringPhasor(
+        cirq.PauliString({q0: cirq.Z, q1: cirq.Z}),
+        exponent_neg=0.25,
+        exponent_pos=-0.25,
+    )
+    pauli_product_dynamics = (
+        est._ReactionDynamicTerm(0, "Z", 0, "Z", 0),
+        est._ReactionDynamicTerm(0, "X", 0, "Z", 1),
+        est._ReactionDynamicTerm(1, "Z", 1, "Z", 0),
+        est._ReactionDynamicTerm(1, "X", 1, "Z", 1),
+    )
+    monkeypatch.setitem(
+        est._FACTORY_REACTION_DYNAMICS,
+        (pauli_product.gate, True),
+        pauli_product_dynamics,
+    )
+    circuit = cirq.Circuit(
+        cirq.Moment([pauli_product]),
+        cirq.Moment([cirq.H(q0)]),
+        cirq.Moment([cirq.T(q0)]),
+        cirq.Moment([cirq.T(q1)]),
+        cirq.Moment([cirq.H(q1)]),
+        cirq.Moment([pauli_product]),
+    )
+    reaction_tree = est.ReactionDepthEstimator(
+        factories={cirq.T: True, pauli_product.gate: True}
+    ).reaction_tree(circuit)
+
+    assert max(reaction_tree.depths[vertex] for vertex in reaction_tree.frontier.values()) == 2
+    assert {
+        (
+            ("X", q0, 0),
+            ("Z", q0, 1),
+            1,
+        ),
+        (
+            ("Z", q0, 1),
+            ("X", q0, 2),
+            0,
+        ),
+        (
+            ("X", q0, 2),
+            ("Z", q0, 3),
+            1,
+        ),
+        (
+            ("Z", q1, 4),
+            ("X", q1, 5),
+            0,
+        ),
+        (
+            ("X", q1, 5),
+            ("Z", q1, 6),
+            1,
+        ),
+    }.issubset(reaction_tree.edges)
 
 
 def test_reaction_depth_propagates_kept_primitive_cliffords() -> None:

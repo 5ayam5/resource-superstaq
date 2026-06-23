@@ -152,9 +152,64 @@ class ResourceEstimator:
         return cirq.num_qubits(circuit) * self.arc.patch.num_physical_qubits
 
 
-ReactionDepth = dict[Literal["X", "Z"], int]
-_ReactionDepthState = list[ReactionDepth]
-_ReactionDynamic = Callable[[_ReactionDepthState], _ReactionDepthState]
+PauliBasis = Literal["X", "Z"]
+ReactionDepth = dict[PauliBasis, int]
+
+
+ReactionTreeVertex = tuple[PauliBasis, cirq.Qid, int]
+ReactionTreeEdge = tuple[ReactionTreeVertex, ReactionTreeVertex, int]
+
+
+@dataclass(frozen=True)
+class ReactionTree:
+    """Sparse weighted DAG describing reaction-depth dependencies.
+
+    Attributes:
+        vertices: All `(pauli, qubit, time)` Pauli vertices in the sparse
+            reaction tree.
+        edges: Weighted `(source, target, weight)` dependency edges between
+            vertices.
+        frontier: Final sparse frontier vertices keyed by `(qubit, pauli)`.
+        depths: Longest weighted path depth for each vertex.
+    """
+
+    vertices: frozenset[ReactionTreeVertex]
+    edges: tuple[ReactionTreeEdge, ...]
+    frontier: dict[tuple[cirq.Qid, PauliBasis], ReactionTreeVertex]
+    depths: dict[ReactionTreeVertex, int]
+
+
+@dataclass(frozen=True)
+class _ReactionDynamicTerm:
+    """Each weighted term for a factory reaction rule.
+    Reaction depth is computed as
+    `target_qubit_index[target_pauli] = max(..., source_qubit_index[source_pauli] + 1, ...)`.
+    """
+
+    source_qubit_index: int
+    source_pauli: PauliBasis
+    target_qubit_index: int
+    target_pauli: PauliBasis
+    weight: int
+
+
+_ReactionDynamic = tuple[_ReactionDynamicTerm, ...]
+
+
+_FACTORY_REACTION_DYNAMICS: dict[tuple[cirq.Gate, bool], _ReactionDynamic] = {
+    (cirq.T, True): (
+        _ReactionDynamicTerm(0, "Z", 0, "Z", 0),
+        _ReactionDynamicTerm(0, "X", 0, "Z", 1),
+    ),
+    (cirq.T, False): (
+        _ReactionDynamicTerm(0, "X", 0, "X", 1),
+        _ReactionDynamicTerm(0, "Z", 0, "Z", 1),
+    ),
+    (cirq.S, False): (
+        _ReactionDynamicTerm(0, "X", 0, "X", 1),
+        _ReactionDynamicTerm(0, "Z", 0, "Z", 1),
+    ),
+}
 
 
 class ReactionDepthEstimator:
@@ -247,6 +302,49 @@ class ReactionDepthEstimator:
                 )
             )
 
+    @staticmethod
+    def _propagated_clifford_bases(
+        input_op: cirq.Operation,
+        source_qubit: cirq.Qid,
+        source_basis: PauliBasis,
+        non_clifford_message: str,
+    ) -> tuple[tuple[cirq.Qid, PauliBasis], ...]:
+        """Propagate one tracked Pauli basis through a Clifford operation.
+
+        Args:
+            input_op: Clifford operation through which the Pauli is propagated.
+            source_qubit: Qubit carrying the source Pauli before `input_op`.
+            source_basis: Source Pauli basis to propagate.
+            non_clifford_message: Error message used when Cirq cannot perform
+                the Clifford conjugation.
+
+        Returns:
+            Target qubit and basis pairs after propagation. A propagated Y Pauli
+            is split into both X and Z basis dependencies.
+
+        Raises:
+            ValueError: If Cirq cannot conjugate the source Pauli by `input_op`.
+        """
+        source_pauli = cirq.PauliString(
+            cirq.X(source_qubit) if source_basis == "X" else cirq.Z(source_qubit)
+        )
+        try:
+            propagated_pauli = source_pauli.conjugated_by(input_op)
+        except ValueError as exc:
+            raise ValueError(non_clifford_message) from exc
+
+        propagated_bases: list[tuple[cirq.Qid, PauliBasis]] = []
+        for target_qubit in propagated_pauli.qubits:
+            target_pauli = propagated_pauli.get(target_qubit)
+            target_bases: tuple[PauliBasis, ...] = {
+                cirq.X: ("X",),
+                cirq.Z: ("Z",),
+                cirq.Y: ("X", "Z"),
+            }[target_pauli]
+            for target_basis in target_bases:
+                propagated_bases.append((target_qubit, target_basis))
+        return tuple(propagated_bases)
+
     def reaction_depth(self, circuit: cirq.Circuit) -> dict[cirq.Qid, ReactionDepth]:
         """Compute reaction depth for a logical circuit.
 
@@ -268,17 +366,101 @@ class ReactionDepthEstimator:
             reaction_dynamic = self._FACTORY_REACTION_DYNAMICS[
                 (input_op.gate, self.factories[input_op.gate])
             ]
-            old_depths = [dict(reaction_depth[qubit]) for qubit in input_op.qubits]
-            new_depths = reaction_dynamic(old_depths)
-            if len(new_depths) != len(input_op.qubits):
-                raise ValueError(
-                    "Reaction dynamic returned "
-                    f"{len(new_depths)} updates for {len(input_op.qubits)} qubits."
+            new_depths: list[ReactionDepth] = [{} for _ in input_op.qubits]
+            for term in reaction_dynamic:
+                source_depth = reaction_depth[input_op.qubits[term.source_qubit_index]].get(
+                    term.source_pauli,
+                    0,
+                )
+                target_depth = new_depths[term.target_qubit_index]
+                target_depth[term.target_pauli] = max(
+                    target_depth.get(term.target_pauli, 0),
+                    source_depth + term.weight,
                 )
             for qubit, new_depth in zip(input_op.qubits, new_depths, strict=True):
                 reaction_depth[qubit].update(new_depth)
 
         return {qubit: dict(depth) for qubit, depth in reaction_depth.items()}
+
+    def reaction_tree(self, circuit: cirq.Circuit) -> ReactionTree:
+        """Build a sparse weighted DAG for reaction-depth dependencies.
+        Reaction depth is the longest weighted path from `time=0` root vertices
+        to the final frontier vertices.
+
+        Args:
+            circuit: Logical circuit whose factory-backed operations and
+                Clifford propagation should be tracked.
+
+        Returns:
+            Sparse reaction tree with vertices, weighted edges, final frontier
+            vertices, and per-vertex longest-path depths.
+        """
+        vertices: set[ReactionTreeVertex] = set()
+        edges: list[ReactionTreeEdge] = []
+        depths: dict[ReactionTreeVertex, int] = {}
+        frontier: dict[tuple[cirq.Qid, PauliBasis], ReactionTreeVertex] = {}
+
+        for qubit in circuit.all_qubits():
+            for pauli in ("X", "Z"):
+                vertex = (pauli, qubit, 0)
+                vertices.add(vertex)
+                depths[vertex] = 0
+                frontier[(qubit, pauli)] = vertex
+
+        for time, input_op in enumerate(circuit.all_operations(), start=1):
+            if input_op.gate in self.factories:
+                reaction_dynamic = _FACTORY_REACTION_DYNAMICS[
+                    (input_op.gate, self.factories[input_op.gate])
+                ]
+                new_vertices: dict[tuple[cirq.Qid, PauliBasis], ReactionTreeVertex] = {}
+                for term in reaction_dynamic:
+                    source_qubit = input_op.qubits[term.source_qubit_index]
+                    target_qubit = input_op.qubits[term.target_qubit_index]
+                    source = frontier[(source_qubit, term.source_pauli)]
+                    target_key = (target_qubit, term.target_pauli)
+                    target = new_vertices.get(target_key)
+                    if target is None:
+                        target = (term.target_pauli, target_qubit, time)
+                        new_vertices[target_key] = target
+                        vertices.add(target)
+                    edges.append((source, target, term.weight))
+                    depths[target] = max(depths.get(target, 0), depths[source] + term.weight)
+                frontier.update(new_vertices)
+                continue
+
+            non_clifford_message = (
+                "Reaction-depth estimator encountered a non-Clifford operation without a "
+                f"factory dynamic: {input_op!r}."
+            )
+            if not cirq.has_stabilizer_effect(input_op.gate):
+                raise ValueError(non_clifford_message)
+
+            new_vertices: dict[tuple[cirq.Qid, PauliBasis], ReactionTreeVertex] = {}
+            for source_qid in input_op.qubits:
+                for source_basis in ("X", "Z"):
+                    source = frontier[(source_qid, source_basis)]
+                    for target_qid, target_basis in self._propagated_clifford_bases(
+                        input_op,
+                        source_qid,
+                        source_basis,
+                        non_clifford_message,
+                    ):
+                        target_key = (target_qid, target_basis)
+                        target = new_vertices.get(target_key)
+                        if target is None:
+                            target = (target_basis, target_key[0], time)
+                            new_vertices[target_key] = target
+                            vertices.add(target)
+                        edges.append((source, target, 0))
+                        depths[target] = max(depths.get(target, 0), depths[source])
+            frontier.update(new_vertices)
+
+        return ReactionTree(
+            vertices=frozenset(vertices),
+            edges=tuple(edges),
+            frontier=dict(frontier),
+            depths=depths,
+        )
 
     def _apply_clifford_reaction_depth(
         self,
@@ -313,24 +495,14 @@ class ReactionDepthEstimator:
 
         for source_qubit, source_depth in old_depths.items():
             for source_basis, depth in source_depth.items():
-                source_pauli = cirq.PauliString(
-                    cirq.X(source_qubit) if source_basis == "X" else cirq.Z(source_qubit)
-                )
-                try:
-                    propagated_pauli = source_pauli.conjugated_by(input_op)
-                except ValueError as exc:
-                    raise ValueError(non_clifford_message) from exc
-
-                for target_qubit in propagated_pauli.qubits:
-                    target_pauli = propagated_pauli.get(target_qubit)
-                    target_bases = {
-                        cirq.X: ("X",),
-                        cirq.Z: ("Z",),
-                        cirq.Y: ("X", "Z"),
-                    }[target_pauli]
+                for target_qubit, target_basis in self._propagated_clifford_bases(
+                    input_op,
+                    source_qubit,
+                    source_basis,
+                    non_clifford_message,
+                ):
                     target_depth = new_depths[target_qubit]
-                    for target_basis in target_bases:
-                        target_depth[target_basis] = max(target_depth[target_basis], depth)
+                    target_depth[target_basis] = max(target_depth[target_basis], depth)
 
         for qubit, new_depth in new_depths.items():
             reaction_depth[qubit].update(new_depth)
