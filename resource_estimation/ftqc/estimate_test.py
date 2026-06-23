@@ -309,7 +309,11 @@ def test_reaction_depth_rejects_wrong_arity_factory_dynamic(
 ) -> None:
     qubit = cirq.LineQubit(0)
     reaction_depth_estimator = est.ReactionDepthEstimator()
-    monkeypatch.setitem(est._FACTORY_REACTION_DYNAMICS, (cirq.T, True), lambda old_depths: [])
+    monkeypatch.setitem(
+        est.ReactionDepthEstimator._FACTORY_REACTION_DYNAMICS,
+        (cirq.T, True),
+        lambda old_depths: [],
+    )
 
     with pytest.raises(ValueError, match="returned 0 updates for 1 qubits"):
         reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.T(qubit)))
