@@ -205,7 +205,7 @@ _FACTORY_REACTION_DYNAMICS: dict[tuple[cirq.Gate, bool], _ReactionDynamic] = {
 
 
 class ReactionDepthEstimator:
-    """Estimator for logical reaction depth in a Clifford+factory circuit.
+    """Estimator for logical reaction depth in a Clifford+T circuit.
 
     The factory map defines which gates are factory-backed. Operations whose
     gates are absent from that map are treated as Clifford operations and
