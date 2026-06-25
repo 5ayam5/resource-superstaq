@@ -221,8 +221,8 @@ class ReactionDepthEstimator:
             _ReactionDynamicTerm(0, "Z", 0, "Z", 1),
         ),
         (cirq.S, False): (
-            _ReactionDynamicTerm(0, "X", 0, "X", 1),
-            _ReactionDynamicTerm(0, "Z", 0, "Z", 1),
+            _ReactionDynamicTerm(0, "Z", 0, "Z", 0),
+            _ReactionDynamicTerm(0, "X", 0, "Z", 1),
         ),
     }
 
