@@ -15,8 +15,7 @@ from __future__ import annotations
 
 import warnings
 from collections import Counter, defaultdict
-from collections.abc import Callable
-from functools import partial
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Literal
 
 import cirq
@@ -179,39 +178,6 @@ class ReactionTree:
     depths: dict[ReactionTreeVertex, int]
 
 
-@dataclass(frozen=True)
-class _ReactionDynamicTerm:
-    """Each weighted term for a factory reaction rule.
-    Reaction depth is computed as
-    `target_qubit_index[target_pauli] = max(..., source_qubit_index[source_pauli] + 1, ...)`.
-    """
-
-    source_qubit_index: int
-    source_pauli: PauliBasis
-    target_qubit_index: int
-    target_pauli: PauliBasis
-    weight: int
-
-
-_ReactionDynamic = tuple[_ReactionDynamicTerm, ...]
-
-
-_FACTORY_REACTION_DYNAMICS: dict[tuple[cirq.Gate, bool], _ReactionDynamic] = {
-    (cirq.T, True): (
-        _ReactionDynamicTerm(0, "Z", 0, "Z", 0),
-        _ReactionDynamicTerm(0, "X", 0, "Z", 1),
-    ),
-    (cirq.T, False): (
-        _ReactionDynamicTerm(0, "X", 0, "X", 1),
-        _ReactionDynamicTerm(0, "Z", 0, "Z", 1),
-    ),
-    (cirq.S, False): (
-        _ReactionDynamicTerm(0, "X", 0, "X", 1),
-        _ReactionDynamicTerm(0, "Z", 0, "Z", 1),
-    ),
-}
-
-
 class ReactionDepthEstimator:
     """Estimator for logical reaction depth in a Clifford+T circuit.
 
@@ -225,47 +191,39 @@ class ReactionDepthEstimator:
             non-auto-corrected (`False`).
     """
 
-    @staticmethod
-    def _t_reaction_dynamic(
-        old_depths: _ReactionDepthState,
-        auto_corrected: bool,
-    ) -> _ReactionDepthState:
-        """Return reaction-depth updates for T factories.
+    @dataclass(frozen=True)
+    class _ReactionDynamicTerm:
+        """One weighted max-equation term for a factory reaction rule.
 
-        Args:
-            old_depths: Single-qubit reaction-depth state before the T
-                correction.
-            auto_corrected: Whether to use auto-corrected T dynamics.
-
-        Returns:
-            Single-qubit update applying `newZ = max(oldZ, oldX + 1)` for
-            auto-corrected T dynamics or `newX = oldX + 1` and
-            `newZ = oldZ + 1` for non-auto-corrected T dynamics.
+        Attributes:
+            source_qubit_index: Operation-local source qubit index.
+            source_pauli: Source Pauli basis before the factory operation.
+            target_qubit_index: Operation-local target qubit index.
+            target_pauli: Target Pauli basis after the factory operation.
+            weight: Reaction-depth increment added to the source depth.
         """
-        old_depth = old_depths[0]
-        if auto_corrected:
-            return [{"Z": max(old_depth.get("X", 0) + 1, old_depth.get("Z", 0))}]
-        return [{"X": old_depth.get("X", 0) + 1, "Z": old_depth.get("Z", 0) + 1}]
 
-    @staticmethod
-    def _s_reaction_dynamic(old_depths: _ReactionDepthState) -> _ReactionDepthState:
-        """Return reaction-depth updates for standard S factories.
+        source_qubit_index: int
+        source_pauli: PauliBasis
+        target_qubit_index: int
+        target_pauli: PauliBasis
+        weight: int
 
-        Args:
-            old_depths: Single-qubit reaction-depth state before the S
-                correction.
-
-        Returns:
-            Single-qubit update applying `newX = oldX + 1` and
-            `newZ = oldZ + 1`.
-        """
-        old_depth = old_depths[0]
-        return [{"X": old_depth.get("X", 0) + 1, "Z": old_depth.get("Z", 0) + 1}]
-
-    _FACTORY_REACTION_DYNAMICS: ClassVar[dict[tuple[cirq.Gate, bool], _ReactionDynamic]] = {
-        (cirq.T, True): partial(_t_reaction_dynamic.__func__, auto_corrected=True),
-        (cirq.T, False): partial(_t_reaction_dynamic.__func__, auto_corrected=False),
-        (cirq.S, False): _s_reaction_dynamic.__func__,
+    _FACTORY_REACTION_DYNAMICS: ClassVar[
+        dict[tuple[cirq.Gate, bool], tuple[_ReactionDynamicTerm, ...]]
+    ] = {
+        (cirq.T, True): (
+            _ReactionDynamicTerm(0, "Z", 0, "Z", 0),
+            _ReactionDynamicTerm(0, "X", 0, "Z", 1),
+        ),
+        (cirq.T, False): (
+            _ReactionDynamicTerm(0, "X", 0, "X", 1),
+            _ReactionDynamicTerm(0, "Z", 0, "Z", 1),
+        ),
+        (cirq.S, False): (
+            _ReactionDynamicTerm(0, "X", 0, "X", 1),
+            _ReactionDynamicTerm(0, "Z", 0, "Z", 1),
+        ),
     }
 
     def __init__(
@@ -409,7 +367,7 @@ class ReactionDepthEstimator:
 
         for time, input_op in enumerate(circuit.all_operations(), start=1):
             if input_op.gate in self.factories:
-                reaction_dynamic = _FACTORY_REACTION_DYNAMICS[
+                reaction_dynamic = self._FACTORY_REACTION_DYNAMICS[
                     (input_op.gate, self.factories[input_op.gate])
                 ]
                 new_vertices: dict[tuple[cirq.Qid, PauliBasis], ReactionTreeVertex] = {}

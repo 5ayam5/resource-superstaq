@@ -312,11 +312,11 @@ def test_reaction_depth_rejects_wrong_arity_factory_dynamic(
     monkeypatch.setitem(
         est.ReactionDepthEstimator._FACTORY_REACTION_DYNAMICS,
         (cirq.T, True),
-        lambda old_depths: [],
+        (est.ReactionDepthEstimator._ReactionDynamicTerm(1, "X", 0, "Z", 1),),
     )
 
     with pytest.raises(IndexError):
-        est.ReactionDepthEstimator().reaction_depth(cirq.Circuit(cirq.T(qubit)))
+        reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.T(qubit)))
 
 
 @pytest.mark.parametrize(
@@ -362,13 +362,13 @@ def test_reaction_tree_tracks_pauli_product_factory_regression(monkeypatch) -> N
         exponent_pos=-0.25,
     )
     pauli_product_dynamics = (
-        est._ReactionDynamicTerm(0, "Z", 0, "Z", 0),
-        est._ReactionDynamicTerm(0, "X", 0, "Z", 1),
-        est._ReactionDynamicTerm(1, "Z", 1, "Z", 0),
-        est._ReactionDynamicTerm(1, "X", 1, "Z", 1),
+        est.ReactionDepthEstimator._ReactionDynamicTerm(0, "Z", 0, "Z", 0),
+        est.ReactionDepthEstimator._ReactionDynamicTerm(0, "X", 0, "Z", 1),
+        est.ReactionDepthEstimator._ReactionDynamicTerm(1, "Z", 1, "Z", 0),
+        est.ReactionDepthEstimator._ReactionDynamicTerm(1, "X", 1, "Z", 1),
     )
     monkeypatch.setitem(
-        est._FACTORY_REACTION_DYNAMICS,
+        est.ReactionDepthEstimator._FACTORY_REACTION_DYNAMICS,
         (pauli_product.gate, True),
         pauli_product_dynamics,
     )
