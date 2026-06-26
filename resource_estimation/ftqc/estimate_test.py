@@ -341,6 +341,7 @@ def test_reaction_tree_frontier_depths_match_reaction_depth(circuit: cirq.Circui
     reaction_depth = reaction_depth_estimator.reaction_depth(circuit)
     reaction_tree = reaction_depth_estimator.reaction_tree(circuit)
 
+    assert reaction_tree.operations == tuple(circuit.all_operations())
     for qubit, depth in reaction_depth.items():
         assert reaction_tree.depths[reaction_tree.frontier[(qubit, "X")]] == depth["X"]
         assert reaction_tree.depths[reaction_tree.frontier[(qubit, "Z")]] == depth["Z"]
@@ -384,6 +385,9 @@ def test_reaction_tree_tracks_pauli_product_factory_regression(monkeypatch) -> N
         factories={cirq.T: True, pauli_product.gate: True}
     ).reaction_tree(circuit)
 
+    assert reaction_tree.operations == tuple(circuit.all_operations())
+    assert reaction_tree.operations[2] == cirq.T(q0)
+    assert reaction_tree.operations[5] == pauli_product
     assert max(reaction_tree.depths[vertex] for vertex in reaction_tree.frontier.values()) == 2
     assert {
         (

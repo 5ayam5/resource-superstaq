@@ -168,12 +168,16 @@ class ReactionTree:
             reaction tree.
         edges: Weighted `(source, target, weight)` dependency edges between
             vertices.
+        operations: Circuit operations ordered by reaction-tree time. A vertex
+            with `time=0` is a root and has no operation; a vertex with `time=t`
+            was produced by `operations[t - 1]`.
         frontier: Final sparse frontier vertices keyed by `(qubit, pauli)`.
         depths: Longest weighted path depth for each vertex.
     """
 
     vertices: frozenset[ReactionTreeVertex]
     edges: tuple[ReactionTreeEdge, ...]
+    operations: tuple[cirq.Operation, ...]
     frontier: dict[tuple[cirq.Qid, PauliBasis], ReactionTreeVertex]
     depths: dict[ReactionTreeVertex, int]
 
@@ -351,8 +355,9 @@ class ReactionDepthEstimator:
 
         Returns:
             Sparse reaction tree with vertices, weighted edges, final frontier
-            vertices, and per-vertex longest-path depths.
+            vertices, operation metadata, and per-vertex longest-path depths.
         """
+        operations = tuple(circuit.all_operations())
         vertices: set[ReactionTreeVertex] = set()
         edges: list[ReactionTreeEdge] = []
         depths: dict[ReactionTreeVertex, int] = {}
@@ -365,7 +370,7 @@ class ReactionDepthEstimator:
                 depths[vertex] = 0
                 frontier[(qubit, pauli)] = vertex
 
-        for time, input_op in enumerate(circuit.all_operations(), start=1):
+        for time, input_op in enumerate(operations, start=1):
             if input_op.gate in self.factories:
                 reaction_dynamic = self._FACTORY_REACTION_DYNAMICS[
                     (input_op.gate, self.factories[input_op.gate])
@@ -416,6 +421,7 @@ class ReactionDepthEstimator:
         return ReactionTree(
             vertices=frozenset(vertices),
             edges=tuple(edges),
+            operations=operations,
             frontier=dict(frontier),
             depths=depths,
         )
