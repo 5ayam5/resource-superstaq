@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import warnings
 from collections import Counter, defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Literal
 
@@ -182,6 +183,25 @@ class ReactionTree:
     depths: dict[ReactionTreeVertex, int]
 
 
+@dataclass(frozen=True)
+class ReactionDynamics:
+    """Describes the reaction dynamics of a factory-type gate.
+
+    Attributes:
+        source_qubit_index: Operation-local source qubit index.
+        source_pauli: Source Pauli basis before the factory operation.
+        target_qubit_index: Operation-local target qubit index.
+        target_pauli: Target Pauli basis after the factory operation.
+        weight: Reaction-depth increment added to the source depth.
+    """
+
+    source_qubit_index: int
+    source_pauli: PauliBasis
+    target_qubit_index: int
+    target_pauli: PauliBasis
+    weight: int
+
+
 class ReactionDepthEstimator:
     """Estimator for logical reaction depth in a Clifford+T circuit.
 
@@ -193,46 +213,32 @@ class ReactionDepthEstimator:
         factories: Gate-to-bool map selecting factory-backed gates and whether
             each factory dynamic is auto-corrected (`True`) or
             non-auto-corrected (`False`).
+        _reaction_dynamics: Instance-owned lookup of factory reaction dynamics
+            keyed by `(gate, auto_corrected)`.
     """
 
-    @dataclass(frozen=True)
-    class _ReactionDynamicTerm:
-        """One weighted max-equation term for a factory reaction rule.
-
-        Attributes:
-            source_qubit_index: Operation-local source qubit index.
-            source_pauli: Source Pauli basis before the factory operation.
-            target_qubit_index: Operation-local target qubit index.
-            target_pauli: Target Pauli basis after the factory operation.
-            weight: Reaction-depth increment added to the source depth.
-        """
-
-        source_qubit_index: int
-        source_pauli: PauliBasis
-        target_qubit_index: int
-        target_pauli: PauliBasis
-        weight: int
-
-    _FACTORY_REACTION_DYNAMICS: ClassVar[
-        dict[tuple[cirq.Gate, bool], tuple[_ReactionDynamicTerm, ...]]
+    _DEFAULT_REACTION_DYNAMICS: ClassVar[
+        dict[tuple[cirq.Gate, bool], tuple[ReactionDynamics, ...]]
     ] = {
         (cirq.T, True): (
-            _ReactionDynamicTerm(0, "Z", 0, "Z", 0),
-            _ReactionDynamicTerm(0, "X", 0, "Z", 1),
+            ReactionDynamics(0, "Z", 0, "Z", 0),
+            ReactionDynamics(0, "X", 0, "Z", 1),
         ),
         (cirq.T, False): (
-            _ReactionDynamicTerm(0, "X", 0, "X", 1),
-            _ReactionDynamicTerm(0, "Z", 0, "Z", 1),
+            ReactionDynamics(0, "X", 0, "X", 1),
+            ReactionDynamics(0, "Z", 0, "Z", 1),
         ),
         (cirq.S, False): (
-            _ReactionDynamicTerm(0, "Z", 0, "Z", 0),
-            _ReactionDynamicTerm(0, "X", 0, "Z", 1),
+            ReactionDynamics(0, "Z", 0, "Z", 0),
+            ReactionDynamics(0, "X", 0, "Z", 1),
         ),
     }
 
     def __init__(
         self,
         factories: dict[cirq.Gate, bool] | None = None,
+        reaction_dynamics: Mapping[tuple[cirq.Gate, bool], Sequence[ReactionDynamics]]
+        | None = None,
     ) -> None:
         """Initialize reaction-depth dynamics for a factory-backed gate set.
 
@@ -241,6 +247,10 @@ class ReactionDepthEstimator:
                 factory-backed gate, and each value selects auto-corrected
                 (`True`) or non-auto-corrected (`False`) dynamics. When omitted,
                 defaults are T auto-corrected and S non-auto-corrected.
+            reaction_dynamics: Optional custom dynamics keyed by
+                `(gate, auto_corrected)`. These entries override built-in
+                dynamics but only make a gate factory-backed when the gate also
+                appears in `factories`.
 
         Raises:
             ValueError: If any supplied `(gate, auto_corrected)` pair has no
@@ -251,10 +261,16 @@ class ReactionDepthEstimator:
         else:
             self.factories = factories
 
+        self._reaction_dynamics = dict(self._DEFAULT_REACTION_DYNAMICS)
+        if reaction_dynamics is not None:
+            self._reaction_dynamics.update(
+                {key: tuple(value) for key, value in reaction_dynamics.items()}
+            )
+
         unsupported_pairs = [
             (gate, auto_corrected)
             for gate, auto_corrected in self.factories.items()
-            if (gate, auto_corrected) not in self._FACTORY_REACTION_DYNAMICS
+            if (gate, auto_corrected) not in self._reaction_dynamics
         ]
         if unsupported_pairs:
             raise ValueError(
@@ -325,7 +341,7 @@ class ReactionDepthEstimator:
                 self._apply_clifford_reaction_depth(input_op, reaction_depth)
                 continue
 
-            reaction_dynamic = self._FACTORY_REACTION_DYNAMICS[
+            reaction_dynamic = self._reaction_dynamics[
                 (input_op.gate, self.factories[input_op.gate])
             ]
             new_depths: list[ReactionDepth] = [{} for _ in input_op.qubits]
@@ -372,7 +388,7 @@ class ReactionDepthEstimator:
 
         for time, input_op in enumerate(operations, start=1):
             if input_op.gate in self.factories:
-                reaction_dynamic = self._FACTORY_REACTION_DYNAMICS[
+                reaction_dynamic = self._reaction_dynamics[
                     (input_op.gate, self.factories[input_op.gate])
                 ]
                 new_vertices: dict[tuple[cirq.Qid, PauliBasis], ReactionTreeVertex] = {}

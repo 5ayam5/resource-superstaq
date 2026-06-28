@@ -304,19 +304,41 @@ def test_reaction_depth_rejects_undefined_factory_corrections(
         est.ReactionDepthEstimator(factories=factories)
 
 
-def test_reaction_depth_rejects_wrong_arity_factory_dynamic(
-    monkeypatch,
-) -> None:
+def test_reaction_depth_rejects_wrong_arity_factory_dynamic() -> None:
     qubit = cirq.LineQubit(0)
-    reaction_depth_estimator = est.ReactionDepthEstimator()
-    monkeypatch.setitem(
-        est.ReactionDepthEstimator._FACTORY_REACTION_DYNAMICS,
-        (cirq.T, True),
-        (est.ReactionDepthEstimator._ReactionDynamicTerm(1, "X", 0, "Z", 1),),
+    reaction_depth_estimator = est.ReactionDepthEstimator(
+        reaction_dynamics={(cirq.T, True): (est.ReactionDynamics(1, "X", 0, "Z", 1),)},
     )
 
     with pytest.raises(IndexError):
         reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.T(qubit)))
+
+
+def test_reaction_depth_uses_custom_factory_dynamics() -> None:
+    qubit = cirq.LineQubit(0)
+    custom_gate = cirq.ZPowGate(exponent=0.25)
+    reaction_depth_estimator = est.ReactionDepthEstimator(
+        factories={custom_gate: True},
+        reaction_dynamics={(custom_gate, True): (est.ReactionDynamics(0, "X", 0, "Z", 2),)},
+    )
+
+    assert reaction_depth_estimator.reaction_depth(cirq.Circuit(custom_gate.on(qubit))) == {
+        qubit: {"X": 0, "Z": 2}
+    }
+
+
+def test_reaction_depth_custom_dynamics_override_is_instance_local() -> None:
+    qubit = cirq.LineQubit(0)
+    reaction_depth_estimator = est.ReactionDepthEstimator(
+        reaction_dynamics={(cirq.T, True): (est.ReactionDynamics(0, "X", 0, "Z", 5),)},
+    )
+
+    assert reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.T(qubit))) == {
+        qubit: {"X": 0, "Z": 5}
+    }
+    assert est.ReactionDepthEstimator().reaction_depth(cirq.Circuit(cirq.T(qubit))) == {
+        qubit: {"X": 0, "Z": 1}
+    }
 
 
 @pytest.mark.parametrize(
@@ -355,7 +377,7 @@ def test_reaction_tree_rejects_non_factory_non_clifford() -> None:
         reaction_depth_estimator.reaction_tree(cirq.Circuit(cirq.CCZ(q0, q1, q2)))
 
 
-def test_reaction_tree_tracks_pauli_product_factory_regression(monkeypatch) -> None:
+def test_reaction_tree_tracks_pauli_product_factory_regression() -> None:
     q0, q1 = cirq.LineQubit.range(2)
     pauli_product = cirq.PauliStringPhasor(
         cirq.PauliString({q0: cirq.Z, q1: cirq.Z}),
@@ -363,15 +385,10 @@ def test_reaction_tree_tracks_pauli_product_factory_regression(monkeypatch) -> N
         exponent_pos=-0.25,
     )
     pauli_product_dynamics = (
-        est.ReactionDepthEstimator._ReactionDynamicTerm(0, "Z", 0, "Z", 0),
-        est.ReactionDepthEstimator._ReactionDynamicTerm(0, "X", 0, "Z", 1),
-        est.ReactionDepthEstimator._ReactionDynamicTerm(1, "Z", 1, "Z", 0),
-        est.ReactionDepthEstimator._ReactionDynamicTerm(1, "X", 1, "Z", 1),
-    )
-    monkeypatch.setitem(
-        est.ReactionDepthEstimator._FACTORY_REACTION_DYNAMICS,
-        (pauli_product.gate, True),
-        pauli_product_dynamics,
+        est.ReactionDynamics(0, "Z", 0, "Z", 0),
+        est.ReactionDynamics(0, "X", 0, "Z", 1),
+        est.ReactionDynamics(1, "Z", 1, "Z", 0),
+        est.ReactionDynamics(1, "X", 1, "Z", 1),
     )
     circuit = cirq.Circuit(
         cirq.Moment([pauli_product]),
@@ -382,7 +399,8 @@ def test_reaction_tree_tracks_pauli_product_factory_regression(monkeypatch) -> N
         cirq.Moment([pauli_product]),
     )
     reaction_tree = est.ReactionDepthEstimator(
-        factories={cirq.T: True, pauli_product.gate: True}
+        factories={cirq.T: True, pauli_product.gate: True},
+        reaction_dynamics={(pauli_product.gate, True): pauli_product_dynamics},
     ).reaction_tree(circuit)
 
     assert reaction_tree.operations == tuple(circuit.all_operations())
