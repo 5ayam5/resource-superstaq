@@ -341,6 +341,40 @@ def test_reaction_depth_custom_dynamics_override_is_instance_local() -> None:
     }
 
 
+def test_reaction_tree_index_creates_root_vertex() -> None:
+    qubit = cirq.LineQubit(0)
+    reaction_tree = est.ReactionTree()
+
+    vertex = reaction_tree[qubit, "X"]
+
+    assert vertex == ("X", qubit, 0)
+    assert reaction_tree.frontier[(qubit, "X")] == vertex
+    assert reaction_tree.vertices == {vertex}
+    assert reaction_tree.depths[vertex] == 0
+    assert reaction_tree[qubit, "X"] == vertex
+
+
+def test_reaction_tree_update_frontier_stages_operation_vertices() -> None:
+    qubit = cirq.LineQubit(0)
+    reaction_tree = est.ReactionTree()
+
+    reaction_tree.update_frontier(
+        [
+            ((qubit, "X"), (qubit, "Z"), 1),
+            ((qubit, "Z"), (qubit, "Z"), 0),
+        ],
+        time=1,
+    )
+
+    source_x = ("X", qubit, 0)
+    source_z = ("Z", qubit, 0)
+    target_z = ("Z", qubit, 1)
+
+    assert reaction_tree.edges == [(source_x, target_z, 1), (source_z, target_z, 0)]
+    assert reaction_tree.frontier[(qubit, "Z")] == target_z
+    assert reaction_tree.depths[target_z] == 1
+
+
 @pytest.mark.parametrize(
     "circuit",
     [
@@ -365,8 +399,8 @@ def test_reaction_tree_frontier_depths_match_reaction_depth(circuit: cirq.Circui
 
     assert reaction_tree.operations == tuple(circuit.all_operations())
     for qubit, depth in reaction_depth.items():
-        assert reaction_tree.depths[reaction_tree.frontier[(qubit, "X")]] == depth["X"]
-        assert reaction_tree.depths[reaction_tree.frontier[(qubit, "Z")]] == depth["Z"]
+        assert reaction_tree.depths[reaction_tree[qubit, "X"]] == depth["X"]
+        assert reaction_tree.depths[reaction_tree[qubit, "Z"]] == depth["Z"]
 
 
 def test_reaction_tree_rejects_non_factory_non_clifford() -> None:
@@ -487,18 +521,3 @@ def test_reaction_depth_rejects_non_factory_non_clifford() -> None:
 
     with pytest.raises(ValueError, match="non-Clifford operation without a factory dynamic"):
         reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.CCZ(q0, q1, q2)))
-
-
-def test_reaction_depth_wraps_clifford_conjugation_errors(monkeypatch) -> None:
-    def raise_conjugation_error(
-        self: cirq.PauliString,
-        input_op: cirq.Operation,
-    ) -> cirq.PauliString:
-        raise ValueError("cannot conjugate")
-
-    qubit = cirq.LineQubit(0)
-    reaction_depth_estimator = est.ReactionDepthEstimator()
-    monkeypatch.setattr(cirq.PauliString, "conjugated_by", raise_conjugation_error)
-
-    with pytest.raises(ValueError, match="non-Clifford operation without a factory dynamic"):
-        reaction_depth_estimator.reaction_depth(cirq.Circuit(cirq.T(qubit), cirq.H(qubit)))
