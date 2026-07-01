@@ -158,12 +158,12 @@ ReactionDepth = dict[PauliBasis, int]
 
 ReactionTreeKey = tuple[cirq.Qid, PauliBasis]
 ReactionTreeVertex = tuple[PauliBasis, cirq.Qid, int]
-ReactionTreeEdge = tuple[ReactionTreeVertex, ReactionTreeVertex, int]
+ReactionTreeEdge = tuple[ReactionTreeVertex, ReactionTreeVertex]
 
 
 @dataclass
 class ReactionTree:
-    """Mutable sparse weighted DAG describing reaction-depth dependencies.
+    """Mutable sparse DAG describing reaction-depth dependencies.
 
     Attributes:
         operations: Circuit operations ordered by reaction-tree time. A vertex
@@ -171,10 +171,9 @@ class ReactionTree:
             was produced by `operations[t - 1]`.
         vertices: All `(pauli, qubit, time)` Pauli vertices in the sparse
             reaction tree.
-        edges: Weighted `(source, target, weight)` dependency edges between
-            vertices.
+        edges: `(source, target)` dependency edges between vertices.
         frontier: Final sparse frontier vertices keyed by `(qubit, pauli)`.
-        depths: Longest weighted path depth for each vertex.
+        depths: Longest dependency path depth for each vertex.
     """
 
     operations: tuple[cirq.Operation, ...] = ()
@@ -203,23 +202,23 @@ class ReactionTree:
 
     def update_frontier(
         self,
-        dependencies: Sequence[tuple[ReactionTreeKey, ReactionTreeKey, int]],
+        dependencies: Sequence[tuple[ReactionTreeKey, ReactionTreeKey]],
         time: int,
     ) -> None:
         """Apply one circuit operation's reaction-tree dependencies.
 
         Args:
-            dependencies: `(source_key, target_key, weight)` dependencies for
-                one circuit operation.
+            dependencies: `(source_key, target_key)` dependencies for one
+                circuit operation.
             time: Reaction-tree time for all target vertices created from
                 `dependencies`.
         """
         new_vertices: dict[ReactionTreeKey, ReactionTreeVertex] = {}
-        for source_node, target_node, weight in dependencies:
+        for source_node, target_node in dependencies:
             source = self[source_node]
             target = new_vertices.setdefault(target_node, (target_node[1], target_node[0], time))
-            self.edges.append((source, target, weight))
-            self.depths[target] = max(self.depths.get(target, 0), self.depths[source] + weight)
+            self.edges.append((source, target))
+            self.depths[target] = max(self.depths.get(target, 0), self.depths[source] + 1)
 
         for key, vertex in new_vertices.items():
             self.frontier[key] = vertex
@@ -444,8 +443,8 @@ class ReactionDepthEstimator:
         return {qubit: dict(depth) for qubit, depth in reaction_depth.items()}
 
     def reaction_tree(self, circuit: cirq.Circuit) -> ReactionTree:
-        """Build a sparse weighted DAG for reaction-depth dependencies.
-        Reaction depth is the longest weighted path from `time=0` root vertices
+        """Build a sparse DAG for reaction-depth dependencies.
+        Tree depth is the longest path from `time=0` root vertices
         to the final frontier vertices.
 
         Args:
@@ -453,14 +452,14 @@ class ReactionDepthEstimator:
                 Clifford propagation should be tracked.
 
         Returns:
-            Sparse reaction tree with vertices, weighted edges, final frontier
+            Sparse reaction tree with vertices, edges, final frontier
             vertices, operation metadata, and per-vertex longest-path depths.
         """
         operations = tuple(circuit.all_operations())
         tree = ReactionTree(operations=operations)
 
         for time, input_op in enumerate(operations, start=1):
-            dependencies: list[tuple[ReactionTreeKey, ReactionTreeKey, int]] = []
+            dependencies: list[tuple[ReactionTreeKey, ReactionTreeKey]] = []
             if input_op.gate in self.factories:
                 reaction_dynamic = self._reaction_dynamics[
                     (input_op.gate, self.factories[input_op.gate])
@@ -470,7 +469,6 @@ class ReactionDepthEstimator:
                         (
                             (input_op.qubits[term.source_qubit_index], term.source_pauli),
                             (input_op.qubits[term.target_qubit_index], term.target_pauli),
-                            term.weight,
                         )
                     )
             else:
@@ -487,7 +485,6 @@ class ReactionDepthEstimator:
                                 (
                                     (source_qid, source_basis),
                                     target_node,
-                                    0,
                                 )
                             )
 

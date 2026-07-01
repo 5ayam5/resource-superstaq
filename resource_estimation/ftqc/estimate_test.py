@@ -360,8 +360,8 @@ def test_reaction_tree_update_frontier_stages_operation_vertices() -> None:
 
     reaction_tree.update_frontier(
         [
-            ((qubit, "X"), (qubit, "Z"), 1),
-            ((qubit, "Z"), (qubit, "Z"), 0),
+            ((qubit, "X"), (qubit, "Z")),
+            ((qubit, "Z"), (qubit, "Z")),
         ],
         time=1,
     )
@@ -370,9 +370,22 @@ def test_reaction_tree_update_frontier_stages_operation_vertices() -> None:
     source_z = ("Z", qubit, 0)
     target_z = ("Z", qubit, 1)
 
-    assert reaction_tree.edges == [(source_x, target_z, 1), (source_z, target_z, 0)]
+    assert reaction_tree.edges == [(source_x, target_z), (source_z, target_z)]
     assert reaction_tree.frontier[(qubit, "Z")] == target_z
     assert reaction_tree.depths[target_z] == 1
+
+    reaction_tree.update_frontier(
+        [
+            ((qubit, "Z"), (qubit, "X")),
+        ],
+        time=2,
+    )
+
+    target_x = ("X", qubit, 2)
+
+    assert reaction_tree.edges[-1] == (target_z, target_x)
+    assert reaction_tree.frontier[(qubit, "X")] == target_x
+    assert reaction_tree.depths[target_x] == 2
 
 
 @pytest.mark.parametrize(
@@ -392,15 +405,15 @@ def test_reaction_tree_update_frontier_stages_operation_vertices() -> None:
         ),
     ],
 )
-def test_reaction_tree_frontier_depths_match_reaction_depth(circuit: cirq.Circuit) -> None:
+def test_reaction_tree_frontier_tracks_reaction_depth_qubits(circuit: cirq.Circuit) -> None:
     reaction_depth_estimator = est.ReactionDepthEstimator()
     reaction_depth = reaction_depth_estimator.reaction_depth(circuit)
     reaction_tree = reaction_depth_estimator.reaction_tree(circuit)
 
     assert reaction_tree.operations == tuple(circuit.all_operations())
-    for qubit, depth in reaction_depth.items():
-        assert reaction_tree.depths[reaction_tree[qubit, "X"]] == depth["X"]
-        assert reaction_tree.depths[reaction_tree[qubit, "Z"]] == depth["Z"]
+    for qubit in reaction_depth:
+        assert (qubit, "X") in reaction_tree.frontier
+        assert (qubit, "Z") in reaction_tree.frontier
 
 
 def test_reaction_tree_rejects_non_factory_non_clifford() -> None:
@@ -440,32 +453,27 @@ def test_reaction_tree_tracks_pauli_product_factory_regression() -> None:
     assert reaction_tree.operations == tuple(circuit.all_operations())
     assert reaction_tree.operations[2] == cirq.T(q0)
     assert reaction_tree.operations[5] == pauli_product
-    assert max(reaction_tree.depths[vertex] for vertex in reaction_tree.frontier.values()) == 2
+    assert max(reaction_tree.depths[vertex] for vertex in reaction_tree.frontier.values()) == 4
     assert {
         (
             ("X", q0, 0),
             ("Z", q0, 1),
-            1,
         ),
         (
             ("Z", q0, 1),
             ("X", q0, 2),
-            0,
         ),
         (
             ("X", q0, 2),
             ("Z", q0, 3),
-            1,
         ),
         (
             ("Z", q1, 4),
             ("X", q1, 5),
-            0,
         ),
         (
             ("X", q1, 5),
             ("Z", q1, 6),
-            1,
         ),
     }.issubset(reaction_tree.edges)
 
