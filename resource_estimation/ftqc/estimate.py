@@ -16,7 +16,7 @@ from __future__ import annotations
 import collections
 import typing
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 import cirq
@@ -176,6 +176,135 @@ class ReactionDynamics(typing.Generic[Q]):
     outputs: tuple[cirq.PauliString[Q], ...]
 
 
+@dataclass(frozen=True)
+class _PackedReactionDynamics:
+    """Reaction dynamics pulled back to the circuit start as packed Paulis."""
+
+    dependency_paulis: tuple[int, ...]
+    outputs: tuple[int, ...]
+
+
+class _CliffordFrame:
+    """Phase-free Pauli frame that pulls Paulis back to the start of a circuit.
+
+    Paulis are bit-packed as `x | z << num_qubits` over the sorted circuit qubits.
+    Applying a Clifford operation only updates the pulled-back images of the X and Z
+    generators on its qubits, so Paulis pulled back at different times never need to
+    be propagated. Conjugation preserves commutation, so two pulled-back Paulis
+    anti-commute exactly when their propagated counterparts do.
+    """
+
+    def __init__(self, qubits: Iterable[cirq.Qid]) -> None:
+        self._qubit_indices = {qubit: index for index, qubit in enumerate(sorted(qubits))}
+        self._num_qubits = len(self._qubit_indices)
+        self._low_mask = (1 << self._num_qubits) - 1
+        self._x_images = [1 << index for index in range(self._num_qubits)]
+        self._z_images = [1 << (index + self._num_qubits) for index in range(self._num_qubits)]
+        self._local_inverse_images: dict[cirq.Gate, tuple[int, ...]] = {}
+
+    def pull_back(self, pauli: cirq.PauliString[cirq.Qid]) -> int:
+        """Packed Pauli at the circuit start that propagates to `pauli` (up to phase)."""
+        packed_pauli = 0
+        for qubit, pauli_gate in pauli.items():
+            index = self._qubit_indices[qubit]
+            if pauli_gate != cirq.Z:
+                packed_pauli ^= self._x_images[index]
+            if pauli_gate != cirq.X:
+                packed_pauli ^= self._z_images[index]
+        return packed_pauli
+
+    def apply(self, operation: cirq.Operation) -> None:
+        """Advance the frame past a Clifford operation."""
+        indices = [self._qubit_indices[qubit] for qubit in operation.qubits]
+        generator_images = [self._x_images[index] for index in indices] + [
+            self._z_images[index] for index in indices
+        ]
+        new_images = []
+        for local_image in self._local_inverse_images_for(operation):
+            image = 0
+            for bit, generator_image in enumerate(generator_images):
+                if local_image >> bit & 1:
+                    image ^= generator_image
+            new_images.append(image)
+        for position, index in enumerate(indices):
+            self._x_images[index] = new_images[position]
+            self._z_images[index] = new_images[position + len(indices)]
+
+    def anticommutes(self, pauli: int, other: int) -> bool:
+        """Whether two packed Paulis anti-commute."""
+        swapped_other = (other >> self._num_qubits) | ((other & self._low_mask) << self._num_qubits)
+        return (pauli & swapped_other).bit_count() % 2 == 1
+
+    def _local_inverse_images_for(self, operation: cirq.Operation) -> tuple[int, ...]:
+        gate = _require_gate_operation(operation).gate
+        if gate not in self._local_inverse_images:
+            self._local_inverse_images[gate] = _local_inverse_images(gate, len(operation.qubits))
+        return self._local_inverse_images[gate]
+
+
+def _local_inverse_images(gate: cirq.Gate, num_qubits: int) -> tuple[int, ...]:
+    """Images of the local X then Z generators under the inverse conjugation by `gate`.
+
+    Images are packed over the gate's local qubits. For the symplectic map `f` given by
+    `cirq.PauliString.conjugated_by`, `f⁻¹(P)` has an X component on qubit `j` iff `P`
+    anti-commutes with `f(Z_j)`, and a Z component iff `P` anti-commutes with `f(X_j)`.
+    """
+    local_qubits = cirq.LineQubit.range(num_qubits)
+    local_frame = _CliffordFrame(local_qubits)
+    operation = gate.on(*local_qubits)
+    forward_images = [
+        local_frame.pull_back(cirq.PauliString(pauli(qubit)).conjugated_by(operation))
+        for pauli in (cirq.X, cirq.Z)
+        for qubit in local_qubits
+    ]
+    inverse_images = []
+    for generator in (1 << bit for bit in range(2 * num_qubits)):
+        image = 0
+        for index in range(num_qubits):
+            if local_frame.anticommutes(generator, forward_images[index + num_qubits]):
+                image |= 1 << index
+            if local_frame.anticommutes(generator, forward_images[index]):
+                image |= 1 << (index + num_qubits)
+        inverse_images.append(image)
+    return tuple(inverse_images)
+
+
+class _DepthSpans:
+    """GF(2) bases of the pulled-back output Paulis created at each reaction depth.
+
+    The symplectic form is linear, so a Pauli anti-commutes with some element of a set
+    iff it anti-commutes with some element of the set's span. A reduced basis per depth
+    (at most `2 * num_qubits` vectors) therefore replaces the full set of outputs.
+    """
+
+    def __init__(self, frame: _CliffordFrame) -> None:
+        self._frame = frame
+        self._bases: list[dict[int, int]] = []
+
+    def insert(self, depth: int, pauli: int) -> None:
+        """Add a packed output Pauli created at `depth`, which starts at one."""
+        while len(self._bases) < depth:
+            self._bases.append({})
+        basis = self._bases[depth - 1]
+        while pauli:
+            pivot = pauli.bit_length()
+            if pivot not in basis:
+                basis[pivot] = pauli
+                return
+            pauli ^= basis[pivot]
+
+    def max_dependency_depth(self, dependency_paulis: tuple[int, ...]) -> int:
+        """Deepest output anti-commuting with any dependency Pauli, or zero if none."""
+        for depth in range(len(self._bases), 0, -1):
+            if any(
+                self._frame.anticommutes(output, dependency_pauli)
+                for output in self._bases[depth - 1].values()
+                for dependency_pauli in dependency_paulis
+            ):
+                return depth
+        return 0
+
+
 class ReactionDepthEstimator:
     """Estimator for logical reaction depth in a Clifford+factory circuit.
 
@@ -281,45 +410,28 @@ class ReactionDepthEstimator:
             Longest factory-vertex dependency chain. Circuits with no factory
             vertices have depth zero.
         """
-        tracked_paulis: dict[cirq.PauliString[cirq.Qid], int] = {}
+        frame = _CliffordFrame(circuit.all_qubits())
+        depth_spans = _DepthSpans(frame)
         reaction_depth = 0
 
         for operation in circuit.all_operations():
             factory_dynamics = self._factory_dynamics(operation)
-            if factory_dynamics is not None:
-                node_depths = tuple(
-                    max(
-                        (
-                            source_depth
-                            for source_pauli, source_depth in tracked_paulis.items()
-                            if self._creates_reaction_dependency(
-                                source_pauli, reaction_dynamics.dependency_paulis
-                            )
-                        ),
-                        default=0,
-                    )
-                    + 1
-                    for reaction_dynamics in factory_dynamics
-                )
-                reaction_depth = max((reaction_depth, *node_depths))
-
-                for reaction_dynamics, node_depth in zip(
-                    factory_dynamics, node_depths, strict=True
-                ):
-                    for output in reaction_dynamics.outputs:
-                        phase_free_output = output.with_coefficient(1)
-                        tracked_paulis[phase_free_output] = max(
-                            tracked_paulis.get(phase_free_output, 0), node_depth
-                        )
+            if factory_dynamics is None:
+                frame.apply(operation)
                 continue
 
-            propagated_paulis: dict[cirq.PauliString[cirq.Qid], int] = {}
-            for pauli, depth in tracked_paulis.items():
-                phase_free_pauli = self._propagate_pauli(pauli, operation).with_coefficient(1)
-                propagated_paulis[phase_free_pauli] = max(
-                    propagated_paulis.get(phase_free_pauli, 0), depth
+            node_depths = tuple(
+                depth_spans.max_dependency_depth(
+                    tuple(frame.pull_back(pauli) for pauli in reaction_dynamics.dependency_paulis)
                 )
-            tracked_paulis = propagated_paulis
+                + 1
+                for reaction_dynamics in factory_dynamics
+            )
+            reaction_depth = max((reaction_depth, *node_depths))
+
+            for reaction_dynamics, node_depth in zip(factory_dynamics, node_depths, strict=True):
+                for output in reaction_dynamics.outputs:
+                    depth_spans.insert(node_depth, frame.pull_back(output))
 
         return reaction_depth
 
@@ -341,14 +453,18 @@ class ReactionDepthEstimator:
         operations = tuple(circuit.all_operations())
         reaction_tree = nx.DiGraph(operations=operations)
         factory_nodes: dict[int, tuple[ReactionTreeNode, ...]] = {}
+        packed_dynamics: dict[ReactionTreeNode, _PackedReactionDynamics] = {}
+        frame = _CliffordFrame(circuit.all_qubits())
         for operation_index, operation in enumerate(operations):
             self._add_reaction_node(
                 operation_index,
                 operation,
+                frame,
                 reaction_tree,
                 factory_nodes,
+                packed_dynamics,
             )
-        self._add_reaction_edges(operations, reaction_tree, factory_nodes)
+        self._add_reaction_edges(frame, reaction_tree, factory_nodes, packed_dynamics)
 
         for depth, nodes in enumerate(nx.topological_generations(reaction_tree), start=1):
             for node in nodes:
@@ -385,11 +501,14 @@ class ReactionDepthEstimator:
         self,
         operation_index: int,
         operation: cirq.Operation,
+        frame: _CliffordFrame,
         reaction_tree: nx.DiGraph,
         factory_nodes: dict[int, tuple[ReactionTreeNode, ...]],
+        packed_dynamics: dict[ReactionTreeNode, _PackedReactionDynamics],
     ) -> None:
         factory_dynamics = self._factory_dynamics(operation)
         if factory_dynamics is None:
+            frame.apply(operation)
             return
 
         nodes: list[ReactionTreeNode] = []
@@ -401,52 +520,51 @@ class ReactionDepthEstimator:
                 dependency_paulis=reaction_dynamics.dependency_paulis,
                 outputs=reaction_dynamics.outputs,
             )
+            packed_dynamics[node] = _PackedReactionDynamics(
+                tuple(frame.pull_back(pauli) for pauli in reaction_dynamics.dependency_paulis),
+                tuple(frame.pull_back(output) for output in reaction_dynamics.outputs),
+            )
         factory_nodes[operation_index] = tuple(nodes)
 
     def _add_reaction_edges(
         self,
-        operations: tuple[cirq.Operation, ...],
+        frame: _CliffordFrame,
         reaction_tree: nx.DiGraph,
         factory_nodes: dict[int, tuple[ReactionTreeNode, ...]],
+        packed_dynamics: dict[ReactionTreeNode, _PackedReactionDynamics],
     ) -> None:
         node_masks = {node: 1 << index for index, node in enumerate(reaction_tree)}
         operation_masks = {
             operation_index: sum(node_masks[node] for node in nodes)
             for operation_index, nodes in factory_nodes.items()
         }
+        factory_operation_indices = tuple(factory_nodes)
         closure_masks: dict[ReactionTreeNode, int] = {}
         future_mask = 0
 
-        for source_operation_index in reversed(factory_nodes):
+        for source_position in reversed(range(len(factory_operation_indices))):
+            source_operation_index = factory_operation_indices[source_position]
             for source_node in factory_nodes[source_operation_index]:
                 covered_mask = 0
-                propagated_paulis = reaction_tree.nodes[source_node]["outputs"]
-                search_mask = future_mask if propagated_paulis else 0
-                for target_operation_index in range(source_operation_index + 1, len(operations)):
+                outputs = packed_dynamics[source_node].outputs
+                search_mask = future_mask if outputs else 0
+                for target_operation_index in factory_operation_indices[source_position + 1 :]:
                     if covered_mask == search_mask:
                         break
-
-                    target_operation = operations[target_operation_index]
-                    target_nodes = factory_nodes.get(target_operation_index)
-                    if target_nodes is None:
-                        propagated_paulis = tuple(
-                            self._propagate_pauli(pauli, target_operation)
-                            for pauli in propagated_paulis
-                        )
-                        continue
 
                     operation_mask = operation_masks[target_operation_index]
                     if covered_mask & operation_mask == operation_mask:
                         continue
 
-                    for target_node in target_nodes:
+                    for target_node in factory_nodes[target_operation_index]:
                         target_mask = node_masks[target_node]
                         if covered_mask & target_mask:
                             continue
-                        dependency_paulis = reaction_tree.nodes[target_node]["dependency_paulis"]
+                        dependency_paulis = packed_dynamics[target_node].dependency_paulis
                         if any(
-                            self._creates_reaction_dependency(propagated_pauli, dependency_paulis)
-                            for propagated_pauli in propagated_paulis
+                            frame.anticommutes(output, dependency_pauli)
+                            for output in outputs
+                            for dependency_pauli in dependency_paulis
                         ):
                             reaction_tree.add_edge(source_node, target_node)
                             covered_mask |= closure_masks[target_node]
@@ -454,23 +572,3 @@ class ReactionDepthEstimator:
                 closure_masks[source_node] = node_masks[source_node] | covered_mask
 
             future_mask |= operation_masks[source_operation_index]
-
-    @staticmethod
-    def _creates_reaction_dependency(
-        pauli: cirq.PauliString[cirq.Qid],
-        dependency_paulis: tuple[cirq.PauliString[cirq.Qid], ...],
-    ) -> bool:
-        return any(
-            not cirq.commutes(pauli, dependency_pauli) for dependency_pauli in dependency_paulis
-        )
-
-    @staticmethod
-    def _propagate_pauli(
-        pauli: cirq.PauliString[cirq.Qid],
-        operation: cirq.Operation,
-    ) -> cirq.PauliString[cirq.Qid]:
-        return (
-            pauli.conjugated_by(operation)
-            if any(qubit in pauli for qubit in operation.qubits)
-            else pauli
-        )
