@@ -200,7 +200,7 @@ class _CliffordFrame:
         self._low_mask = (1 << self._num_qubits) - 1
         self._x_images = [1 << index for index in range(self._num_qubits)]
         self._z_images = [1 << (index + self._num_qubits) for index in range(self._num_qubits)]
-        self._local_inverse_images: dict[cirq.Gate, tuple[int, ...]] = {}
+        self._local_pull_back_images: dict[cirq.Gate, tuple[int, ...]] = {}
 
     def pull_back(self, pauli: cirq.PauliString[cirq.Qid]) -> int:
         """Packed Pauli at the circuit start that propagates to `pauli` (up to phase)."""
@@ -220,7 +220,7 @@ class _CliffordFrame:
             self._z_images[index] for index in indices
         ]
         new_images = []
-        for local_image in self._local_inverse_images_for(operation):
+        for local_image in self._local_pull_back_images_for(operation):
             image = 0
             for bit, generator_image in enumerate(generator_images):
                 if local_image >> bit & 1:
@@ -235,38 +235,30 @@ class _CliffordFrame:
         swapped_other = (other >> self._num_qubits) | ((other & self._low_mask) << self._num_qubits)
         return (pauli & swapped_other).bit_count() % 2 == 1
 
-    def _local_inverse_images_for(self, operation: cirq.Operation) -> tuple[int, ...]:
+    def _local_pull_back_images_for(self, operation: cirq.Operation) -> tuple[int, ...]:
         gate = _require_gate_operation(operation).gate
-        if gate not in self._local_inverse_images:
-            self._local_inverse_images[gate] = _local_inverse_images(gate, len(operation.qubits))
-        return self._local_inverse_images[gate]
+        if gate not in self._local_pull_back_images:
+            self._local_pull_back_images[gate] = _local_pull_back_images(
+                gate, len(operation.qubits)
+            )
+        return self._local_pull_back_images[gate]
 
 
-def _local_inverse_images(gate: cirq.Gate, num_qubits: int) -> tuple[int, ...]:
-    """Images of the local X then Z generators under the inverse conjugation by `gate`.
+def _local_pull_back_images(gate: cirq.Gate, num_qubits: int) -> tuple[int, ...]:
+    """Images of the local X then Z generators pulled back across `gate`.
 
-    Images are packed over the gate's local qubits. For the symplectic map `f` given by
-    `cirq.PauliString.conjugated_by`, `f⁻¹(P)` has an X component on qubit `j` iff `P`
-    anti-commutes with `f(Z_j)`, and a Z component iff `P` anti-commutes with `f(X_j)`.
+    Paulis move forward across a Clifford `C` as `P -> C P C†`, so pulling back is
+    `P -> C† P C`, which is `cirq.PauliString.conjugated_by`. Images are packed over the
+    gate's local qubits.
     """
     local_qubits = cirq.LineQubit.range(num_qubits)
     local_frame = _CliffordFrame(local_qubits)
     operation = gate.on(*local_qubits)
-    forward_images = [
+    return tuple(
         local_frame.pull_back(cirq.PauliString(pauli(qubit)).conjugated_by(operation))
         for pauli in (cirq.X, cirq.Z)
         for qubit in local_qubits
-    ]
-    inverse_images = []
-    for generator in (1 << bit for bit in range(2 * num_qubits)):
-        image = 0
-        for index in range(num_qubits):
-            if local_frame.anticommutes(generator, forward_images[index + num_qubits]):
-                image |= 1 << index
-            if local_frame.anticommutes(generator, forward_images[index]):
-                image |= 1 << (index + num_qubits)
-        inverse_images.append(image)
-    return tuple(inverse_images)
+    )
 
 
 class _DepthSpans:
@@ -309,8 +301,9 @@ class ReactionDepthEstimator:
     """Estimator for logical reaction depth in a Clifford+factory circuit.
 
     Factory operations become graph vertices. Their output Paulis propagate
-    through later Clifford operations. An output creates a dependency when it
-    anti-commutes with any of the target vertex's dependency Paulis.
+    forward through later Clifford operations: reading the circuit left to right,
+    `- P - C -` becomes `- C - P' -` with `P' = C P C†`. An output creates a dependency
+    when it anti-commutes with any of the target vertex's dependency Paulis.
     """
 
     _DEFAULT_FACTORIES: typing.ClassVar[dict[cirq.Gate, bool]] = {

@@ -831,95 +831,132 @@ def test_reaction_tree_rejects_non_factory_non_clifford() -> None:
         reaction_depth_estimator.reaction_tree(cirq.Circuit(cirq.TOFFOLI(q0, q1, q2)))
 
 
-def random_reaction_circuit(num_qubits: int, num_operations: int, seed: int) -> cirq.Circuit:
-    rng = np.random.default_rng(seed)
-    qubits = cirq.LineQubit.range(num_qubits)
-    gates: tuple[cirq.Gate, ...] = (
-        cirq.H,
-        cirq.S,
-        cirq.S**-1,
-        cirq.SingleQubitCliffordGate.X_sqrt,
-        cirq.CNOT,
-        cirq.CZ,
-        cirq.SWAP,
-        cirq.ISWAP,
-        cirq.T,
-        cirq.T,
-        cirq.T,
-        cirq.CCZ,
-    )
-    operations = []
-    for _ in range(num_operations):
-        gate = gates[rng.integers(len(gates))]
-        gate_qubits = rng.choice(num_qubits, size=cirq.num_qubits(gate), replace=False)
-        operations.append(gate.on(*(qubits[index] for index in gate_qubits)))
-    return cirq.Circuit(operations)
+Q0, Q1 = cirq.LineQubit.range(2)
+# Moves Paulis forward as X -> Y -> Z -> X, so unlike H, S or CNOT it is not its own inverse.
+XYZ_CYCLE = cirq.SingleQubitCliffordGate.from_xz_map(x_to=(cirq.Y, False), z_to=(cirq.X, False))
 
 
-def propagated_dependency_graph(
-    reaction_depth_estimator: est.ReactionDepthEstimator, circuit: cirq.Circuit
-) -> nx.DiGraph:
-    """Unreduced factory-vertex dependency DAG built by propagating outputs with cirq."""
-    operations = tuple(circuit.all_operations())
-    factory_dynamics = [
-        reaction_depth_estimator._factory_dynamics(operation) for operation in operations
-    ]
-    dependency_graph = nx.DiGraph()
-    for operation_index, dynamics in enumerate(factory_dynamics):
-        dependency_graph.add_nodes_from(
-            (operation_index, vertex_index) for vertex_index in range(len(dynamics or ()))
-        )
-
-    for source_index, source_dynamics in enumerate(factory_dynamics):
-        for source_vertex, reaction_dynamics in enumerate(source_dynamics or ()):
-            propagated_paulis = reaction_dynamics.outputs
-            for target_index in range(source_index + 1, len(operations)):
-                target_dynamics = factory_dynamics[target_index]
-                if target_dynamics is None:
-                    propagated_paulis = tuple(
-                        pauli.conjugated_by(operations[target_index]) for pauli in propagated_paulis
-                    )
-                    continue
-                for target_vertex, target_reaction_dynamics in enumerate(target_dynamics):
-                    if any(
-                        not cirq.commutes(pauli, dependency_pauli)
-                        for pauli in propagated_paulis
-                        for dependency_pauli in target_reaction_dynamics.dependency_paulis
-                    ):
-                        dependency_graph.add_edge(
-                            (source_index, source_vertex), (target_index, target_vertex)
-                        )
-    return dependency_graph
-
-
-def assert_matches_propagated_dependencies(
-    reaction_depth_estimator: est.ReactionDepthEstimator, circuit: cirq.Circuit
+@pytest.mark.parametrize(
+    ("circuit", "expected_edges"),
+    [
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.H(Q0), cirq.S(Q0), cirq.H(Q0), cirq.T(Q0)),
+            {((0, 0), (4, 0))},
+            id="s-maps-x-to-y",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.H(Q0), cirq.S(Q0), cirq.S(Q0), cirq.H(Q0), cirq.T(Q0)),
+            set(),
+            id="two-s-gates-cancel",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.H(Q0), cirq.S(Q0) ** -1, cirq.H(Q0), cirq.T(Q0)),
+            {((0, 0), (4, 0))},
+            id="s-dagger-maps-x-to-y",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.SingleQubitCliffordGate.X_sqrt(Q0), cirq.T(Q0)),
+            {((0, 0), (2, 0))},
+            id="sqrt-x-maps-z-to-y",
+        ),
+        pytest.param(
+            cirq.Circuit(
+                cirq.T(Q0),
+                cirq.SingleQubitCliffordGate.X_sqrt(Q0),
+                cirq.SingleQubitCliffordGate.X_sqrt(Q0),
+                cirq.T(Q0),
+            ),
+            set(),
+            id="two-sqrt-x-gates-cancel",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), XYZ_CYCLE(Q0), cirq.H(Q0), cirq.T(Q0)),
+            set(),
+            id="xyz-cycle-maps-z-to-x",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), (XYZ_CYCLE**-1)(Q0), cirq.H(Q0), cirq.T(Q0)),
+            {((0, 0), (3, 0))},
+            id="inverse-xyz-cycle-maps-z-to-y",
+        ),
+        # In the two-qubit cases, H(Q1) makes T(Q1) depend on any Z that reaches Q1.
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.CNOT(Q0, Q1), cirq.H(Q1), cirq.T(Q1)),
+            set(),
+            id="cnot-keeps-z-on-control",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.CNOT(Q1, Q0), cirq.H(Q1), cirq.T(Q1)),
+            {((0, 0), (3, 0))},
+            id="cnot-spreads-z-from-target-to-control",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.H(Q0), cirq.CZ(Q0, Q1), cirq.H(Q1), cirq.T(Q1)),
+            {((0, 0), (4, 0))},
+            id="cz-adds-z-to-x",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.SWAP(Q0, Q1), cirq.H(Q1), cirq.T(Q1)),
+            {((0, 0), (3, 0))},
+            id="swap-moves-z",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.ISWAP(Q0, Q1), cirq.H(Q1), cirq.T(Q1)),
+            {((0, 0), (3, 0))},
+            id="iswap-moves-z",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.CNOT(Q1, Q0), cirq.CNOT(Q1, Q0), cirq.H(Q1), cirq.T(Q1)),
+            set(),
+            id="two-cnots-cancel",
+        ),
+    ],
+)
+def test_reaction_dependencies_follow_clifford_propagation(
+    circuit: cirq.Circuit,
+    expected_edges: set[tuple[est.ReactionTreeNode, est.ReactionTreeNode]],
 ) -> None:
-    dependency_graph = propagated_dependency_graph(reaction_depth_estimator, circuit)
-    expected_depths: dict[est.ReactionTreeNode, int] = {}
-    for node in nx.topological_sort(dependency_graph):
-        expected_depths[node] = 1 + max(
-            (expected_depths[source] for source in dependency_graph.predecessors(node)), default=0
-        )
+    # S is not a factory here, so it propagates T outputs like any other Clifford.
+    reaction_depth_estimator = est.ReactionDepthEstimator(factories={cirq.T: True})
+
+    assert set(reaction_depth_estimator.reaction_tree(circuit).edges) == expected_edges
+    assert reaction_depth_estimator.reaction_depth(circuit) == 1 + len(expected_edges)
+
+
+def test_reaction_depth_tracks_parallel_chains_independently() -> None:
+    q0, q1 = cirq.LineQubit.range(2)
+    reaction_depth_estimator = est.ReactionDepthEstimator()
+    circuit = cirq.Circuit(
+        cirq.Moment(cirq.T(q0), cirq.T(q1)),
+        cirq.Moment(cirq.H(q0), cirq.H(q1)),
+        cirq.Moment(cirq.T(q0), cirq.T(q1)),
+        cirq.Moment(cirq.H(q1)),
+        cirq.Moment(cirq.T(q1)),
+    )
 
     reaction_tree = reaction_depth_estimator.reaction_tree(circuit)
 
-    assert set(reaction_tree.edges) == set(nx.transitive_reduction(dependency_graph).edges)
-    assert dict(reaction_tree.nodes(data="depth")) == expected_depths
-    assert reaction_depth_estimator.reaction_depth(circuit) == max(
-        expected_depths.values(), default=0
-    )
+    assert set(reaction_tree.edges) == {((0, 0), (4, 0)), ((1, 0), (5, 0)), ((5, 0), (7, 0))}
+    assert dict(reaction_tree.nodes(data="depth")) == {
+        (0, 0): 1,
+        (1, 0): 1,
+        (4, 0): 2,
+        (5, 0): 2,
+        (7, 0): 3,
+    }
+    assert reaction_depth_estimator.reaction_depth(circuit) == 3
 
 
-@pytest.mark.parametrize("seed", range(5))
-@pytest.mark.parametrize("auto_corrected_t", [True, False])
-def test_reaction_depth_matches_propagated_dependencies(seed: int, auto_corrected_t: bool) -> None:
-    reaction_depth_estimator = est.ReactionDepthEstimator(
-        factories={cirq.T: auto_corrected_t, cirq.S: True, cirq.CCZ: True},
-    )
-    circuit = random_reaction_circuit(num_qubits=5, num_operations=80, seed=seed)
+def test_reaction_depth_handles_linearly_dependent_factory_outputs() -> None:
+    # The CCZ outputs Z(q1)Z(q2), Z(q0)Z(q2) and Z(q0)Z(q1) multiply to the identity.
+    q0, q1, q2 = cirq.LineQubit.range(3)
+    reaction_depth_estimator = est.ReactionDepthEstimator()
+    circuit = cirq.Circuit(cirq.CCZ(q0, q1, q2), cirq.H(q0), cirq.T(q0))
 
-    assert_matches_propagated_dependencies(reaction_depth_estimator, circuit)
+    reaction_tree = reaction_depth_estimator.reaction_tree(circuit)
+
+    assert set(reaction_tree.edges) == {((0, 1), (2, 0)), ((0, 2), (2, 0))}
+    assert reaction_depth_estimator.reaction_depth(circuit) == 2
 
 
 def test_reaction_depth_treats_measurement_as_identity_propagation() -> None:
@@ -931,5 +968,7 @@ def test_reaction_depth_treats_measurement_as_identity_propagation() -> None:
         cirq.T(q0), cirq.measure(q0), cirq.CNOT(q0, q1), cirq.measure(q1), cirq.T(q1)
     )
 
-    assert_matches_propagated_dependencies(reaction_depth_estimator, circuit)
+    reaction_tree = reaction_depth_estimator.reaction_tree(circuit)
+
+    assert set(reaction_tree.edges) == {((0, 0), (4, 0))}
     assert reaction_depth_estimator.reaction_depth(circuit) == 2
