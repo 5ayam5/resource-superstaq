@@ -829,3 +829,203 @@ def test_reaction_tree_rejects_non_factory_non_clifford() -> None:
         ValueError, match="non-Clifford operation without factory reaction dynamics"
     ):
         reaction_depth_estimator.reaction_tree(cirq.Circuit(cirq.TOFFOLI(q0, q1, q2)))
+
+
+Q0, Q1 = cirq.LineQubit.range(2)
+# Moves Paulis forward as X -> Y -> Z -> X, so unlike H, S or CNOT it is not its own inverse.
+XYZ_CYCLE = cirq.SingleQubitCliffordGate.from_xz_map(x_to=(cirq.Y, False), z_to=(cirq.X, False))
+
+
+@pytest.mark.parametrize(
+    ("circuit", "expected_edges"),
+    [
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.H(Q0), cirq.S(Q0), cirq.H(Q0), cirq.T(Q0)),
+            {((0, 0), (4, 0))},
+            id="s-maps-x-to-y",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.H(Q0), cirq.S(Q0), cirq.S(Q0), cirq.H(Q0), cirq.T(Q0)),
+            set(),
+            id="two-s-gates-cancel",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.H(Q0), cirq.S(Q0) ** -1, cirq.H(Q0), cirq.T(Q0)),
+            {((0, 0), (4, 0))},
+            id="s-dagger-maps-x-to-y",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.SingleQubitCliffordGate.X_sqrt(Q0), cirq.T(Q0)),
+            {((0, 0), (2, 0))},
+            id="sqrt-x-maps-z-to-y",
+        ),
+        pytest.param(
+            cirq.Circuit(
+                cirq.T(Q0),
+                cirq.SingleQubitCliffordGate.X_sqrt(Q0),
+                cirq.SingleQubitCliffordGate.X_sqrt(Q0),
+                cirq.T(Q0),
+            ),
+            set(),
+            id="two-sqrt-x-gates-cancel",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), XYZ_CYCLE(Q0), cirq.H(Q0), cirq.T(Q0)),
+            set(),
+            id="xyz-cycle-maps-z-to-x",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), (XYZ_CYCLE**-1)(Q0), cirq.H(Q0), cirq.T(Q0)),
+            {((0, 0), (3, 0))},
+            id="inverse-xyz-cycle-maps-z-to-y",
+        ),
+        # In the two-qubit cases, H(Q1) makes T(Q1) depend on any Z that reaches Q1.
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.CNOT(Q0, Q1), cirq.H(Q1), cirq.T(Q1)),
+            set(),
+            id="cnot-keeps-z-on-control",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.CNOT(Q1, Q0), cirq.H(Q1), cirq.T(Q1)),
+            {((0, 0), (3, 0))},
+            id="cnot-spreads-z-from-target-to-control",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.H(Q0), cirq.CZ(Q0, Q1), cirq.H(Q1), cirq.T(Q1)),
+            {((0, 0), (4, 0))},
+            id="cz-adds-z-to-x",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.SWAP(Q0, Q1), cirq.H(Q1), cirq.T(Q1)),
+            {((0, 0), (3, 0))},
+            id="swap-moves-z",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.ISWAP(Q0, Q1), cirq.H(Q1), cirq.T(Q1)),
+            {((0, 0), (3, 0))},
+            id="iswap-moves-z",
+        ),
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.CNOT(Q1, Q0), cirq.CNOT(Q1, Q0), cirq.H(Q1), cirq.T(Q1)),
+            set(),
+            id="two-cnots-cancel",
+        ),
+    ],
+)
+def test_reaction_dependencies_follow_clifford_propagation(
+    circuit: cirq.Circuit,
+    expected_edges: set[tuple[est.ReactionTreeNode, est.ReactionTreeNode]],
+) -> None:
+    # S is not a factory here, so it propagates T outputs like any other Clifford.
+    reaction_depth_estimator = est.ReactionDepthEstimator(factories={cirq.T: True})
+
+    assert set(reaction_depth_estimator.reaction_tree(circuit).edges) == expected_edges
+    assert reaction_depth_estimator.reaction_depth(circuit) == 1 + len(expected_edges)
+
+
+def test_reaction_depth_tracks_parallel_chains_independently() -> None:
+    q0, q1 = cirq.LineQubit.range(2)
+    reaction_depth_estimator = est.ReactionDepthEstimator()
+    circuit = cirq.Circuit(
+        cirq.Moment(cirq.T(q0), cirq.T(q1)),
+        cirq.Moment(cirq.H(q0), cirq.H(q1)),
+        cirq.Moment(cirq.T(q0), cirq.T(q1)),
+        cirq.Moment(cirq.H(q1)),
+        cirq.Moment(cirq.T(q1)),
+    )
+
+    reaction_tree = reaction_depth_estimator.reaction_tree(circuit)
+
+    assert set(reaction_tree.edges) == {((0, 0), (4, 0)), ((1, 0), (5, 0)), ((5, 0), (7, 0))}
+    assert dict(reaction_tree.nodes(data="depth")) == {
+        (0, 0): 1,
+        (1, 0): 1,
+        (4, 0): 2,
+        (5, 0): 2,
+        (7, 0): 3,
+    }
+    assert reaction_depth_estimator.reaction_depth(circuit) == 3
+
+
+def test_reaction_depth_handles_linearly_dependent_factory_outputs() -> None:
+    # The CCZ outputs Z(q1)Z(q2), Z(q0)Z(q2) and Z(q0)Z(q1) multiply to the identity.
+    q0, q1, q2 = cirq.LineQubit.range(3)
+    reaction_depth_estimator = est.ReactionDepthEstimator()
+    circuit = cirq.Circuit(cirq.CCZ(q0, q1, q2), cirq.H(q0), cirq.T(q0))
+
+    reaction_tree = reaction_depth_estimator.reaction_tree(circuit)
+
+    assert set(reaction_tree.edges) == {((0, 1), (2, 0)), ((0, 2), (2, 0))}
+    assert reaction_depth_estimator.reaction_depth(circuit) == 2
+
+
+def test_reaction_depth_treats_measurement_as_identity_propagation() -> None:
+    q0, q1 = cirq.LineQubit.range(2)
+    reaction_depth_estimator = est.ReactionDepthEstimator(
+        factories={cirq.T: False},
+    )
+    circuit = cirq.Circuit(
+        cirq.T(q0), cirq.measure(q0), cirq.CNOT(q0, q1), cirq.measure(q1), cirq.T(q1)
+    )
+
+    reaction_tree = reaction_depth_estimator.reaction_tree(circuit)
+
+    assert set(reaction_tree.edges) == {((0, 0), (4, 0))}
+    assert reaction_depth_estimator.reaction_depth(circuit) == 2
+
+
+@pytest.mark.parametrize(
+    ("circuit", "expected_edges", "expected_depth"),
+    [
+        # The last H turns the first T's output back into Z, which commutes with the last T.
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.H(Q0), cirq.T(Q0), cirq.H(Q0), cirq.T(Q0)),
+            {((0, 0), (2, 0)), ((2, 0), (4, 0))},
+            3,
+            id="chain",
+        ),
+        # Both later T gates depend on the first one, but their own Z outputs commute.
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.H(Q0), cirq.T(Q0), cirq.T(Q0)),
+            {((0, 0), (2, 0)), ((0, 0), (3, 0))},
+            2,
+            id="fan-out",
+        ),
+    ],
+)
+def test_reaction_tree_follows_non_transitive_dependencies(
+    circuit: cirq.Circuit,
+    expected_edges: set[tuple[est.ReactionTreeNode, est.ReactionTreeNode]],
+    expected_depth: int,
+) -> None:
+    reaction_depth_estimator = est.ReactionDepthEstimator()
+
+    reaction_tree = reaction_depth_estimator.reaction_tree(circuit)
+
+    assert set(reaction_tree.edges) == expected_edges
+    assert reaction_depth_estimator.reaction_depth(circuit) == expected_depth
+
+
+def test_reaction_tree_keeps_long_lived_vertices_while_dropping_finished_ones() -> None:
+    # Every chain T only depends on the previous one, so older chain vertices stop being tracked
+    # and are renumbered away, while the first T(q1) stays tracked until the last T(q1) needs it.
+    q0, q1 = cirq.LineQubit.range(2)
+    num_chain_t_gates = 300
+    reaction_depth_estimator = est.ReactionDepthEstimator()
+    circuit = cirq.Circuit(
+        cirq.T(q1),
+        *(op for _ in range(num_chain_t_gates) for op in (cirq.T(q0), cirq.H(q0))),
+        cirq.H(q1),
+        cirq.T(q1),
+        strategy=cirq.InsertStrategy.NEW,
+    )
+    last_operation_index = 2 * num_chain_t_gates + 2
+
+    reaction_tree = reaction_depth_estimator.reaction_tree(circuit)
+
+    assert set(reaction_tree.edges) == {
+        ((2 * index + 1, 0), (2 * index + 3, 0)) for index in range(num_chain_t_gates - 1)
+    } | {((0, 0), (last_operation_index, 0))}
+    assert reaction_tree.nodes[(2 * num_chain_t_gates - 1, 0)]["depth"] == num_chain_t_gates
+    assert reaction_tree.nodes[(last_operation_index, 0)]["depth"] == 2
+    assert reaction_depth_estimator.reaction_depth(circuit) == num_chain_t_gates
