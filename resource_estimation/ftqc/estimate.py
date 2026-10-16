@@ -21,6 +21,8 @@ from dataclasses import dataclass
 
 import cirq
 import networkx as nx
+import numpy as np
+import numpy.typing as npt
 from tqdm import tqdm
 
 if typing.TYPE_CHECKING:  # pragma: no cover
@@ -176,14 +178,6 @@ class ReactionDynamics(typing.Generic[Q]):
     outputs: tuple[cirq.PauliString[Q], ...]
 
 
-@dataclass(frozen=True)
-class _PackedReactionDynamics:
-    """Reaction dynamics pulled back to the circuit start as packed Paulis."""
-
-    dependency_paulis: tuple[int, ...]
-    outputs: tuple[int, ...]
-
-
 class _CliffordFrame:
     """Phase-free Pauli frame that pulls Paulis back to the start of a circuit.
 
@@ -295,6 +289,185 @@ class _DepthSpans:
             ):
                 return depth
         return 0
+
+
+# Renumbering waits until the index space exceeds twice the live vertices by this many bits.
+_RENUMBERING_SLACK = 64
+
+
+class _ReactionFrames:
+    """Phase-free Pauli frames of factory outputs, propagated forward and bit-sliced by qubit.
+
+    Bit `i` of every column and ancestor mask refers to tracked vertex `i`, in circuit order.
+    In lane `j`, bit `i` of the X (Z) column of a qubit is set when the `j`-th output of vertex
+    `i`, propagated to the current point of the circuit, has an X (Z) component on that qubit.
+    Dependency Paulis are operation-local, so the vertices with an output anti-commuting with
+    one are an XOR of a few columns, and a Clifford operation only recombines the columns of
+    its qubits.
+    """
+
+    def __init__(self, qubits: Iterable[cirq.Qid]) -> None:
+        self._qubit_indices = {qubit: index for index, qubit in enumerate(sorted(qubits))}
+        self._lanes: list[tuple[list[int], list[int]]] = []
+        self._nodes: list[ReactionTreeNode] = []
+        self._ancestor_masks: list[int] = []
+        self._next_renumbering = _RENUMBERING_SLACK
+        self._local_forward_sources: dict[cirq.Gate, tuple[tuple[int, ...], ...]] = {}
+
+    def apply(self, operation: cirq.Operation) -> None:
+        """Propagate every tracked output forward across a Clifford operation."""
+        local_forward_sources = self._local_forward_sources_for(operation)
+        if not local_forward_sources:
+            return
+        indices = [self._qubit_indices[qubit] for qubit in operation.qubits]
+        for x_columns, z_columns in self._lanes:
+            local_columns = [x_columns[index] for index in indices] + [
+                z_columns[index] for index in indices
+            ]
+            new_columns = []
+            for sources in local_forward_sources:
+                column = 0
+                for source in sources:
+                    column ^= local_columns[source]
+                new_columns.append(column)
+            for position, index in enumerate(indices):
+                x_columns[index] = new_columns[position]
+                z_columns[index] = new_columns[position + len(indices)]
+
+    def reduced_parents(
+        self, dependency_paulis: tuple[cirq.PauliString[cirq.Qid], ...]
+    ) -> tuple[list[ReactionTreeNode], int]:
+        """Transitive-reduction parents of a new vertex, and the mask of its tracked ancestors.
+
+        Every vertex reachable from a candidate comes after it, so the latest candidate reaches
+        no other candidate and is a parent. Clearing it and its ancestors leaves the candidates
+        that reach none of the parents found so far.
+        """
+        parents: list[ReactionTreeNode] = []
+        ancestors = 0
+        candidates = self._anticommuting(dependency_paulis)
+        while candidates:
+            parent = candidates.bit_length() - 1
+            parents.append(self._nodes[parent])
+            ancestors |= self._ancestor_masks[parent]
+            candidates &= ~self._ancestor_masks[parent]
+        return parents, ancestors
+
+    def add(
+        self,
+        node: ReactionTreeNode,
+        outputs: tuple[cirq.PauliString[cirq.Qid], ...],
+        ancestors: int,
+    ) -> None:
+        """Track a new vertex given the mask of its tracked ancestors.
+
+        Each output is also absorbed into the tracked outputs of the ancestors that share its
+        first component. Multiplying a tracked output by a descendant's output leaves the parents
+        of every later vertex unchanged: a vertex with no descendant that the later vertex depends
+        on anti-commutes with it exactly as before, and any other vertex reaches a parent either
+        way. Vertices whose tracked outputs all become the identity can never be parents again.
+        """
+        vertex_mask = 1 << len(self._nodes)
+        self._nodes.append(node)
+        self._ancestor_masks.append(ancestors | vertex_mask)
+        while len(self._lanes) < len(outputs):
+            self._lanes.append(([0] * len(self._qubit_indices), [0] * len(self._qubit_indices)))
+        for (x_columns, z_columns), output in zip(self._lanes, outputs):
+            components: list[tuple[list[int], int]] = []
+            for qubit, pauli_gate in output.items():
+                index = self._qubit_indices[qubit]
+                if pauli_gate != cirq.Z:
+                    components.append((x_columns, index))
+                if pauli_gate != cirq.X:
+                    components.append((z_columns, index))
+            if components:
+                pivot_columns, pivot_index = components[0]
+                absorbed = ancestors & pivot_columns[pivot_index]
+                for columns, index in components:
+                    columns[index] ^= absorbed | vertex_mask
+
+    def renumber_if_sparse(self) -> None:
+        """Drop the vertices whose tracked outputs are all the identity, once they dominate.
+
+        Identity outputs stay the identity under propagation and absorption, so dropped vertices
+        never return. Checks are spaced out geometrically when few vertices drop out.
+        """
+        num_bits = len(self._nodes)
+        if num_bits < self._next_renumbering:
+            return
+        live = 0
+        for x_columns, z_columns in self._lanes:
+            for column in (*x_columns, *z_columns):
+                live |= column
+        if num_bits >= 2 * live.bit_count() + _RENUMBERING_SLACK:
+            positions = _bit_positions(live, num_bits)
+            for x_columns, z_columns in self._lanes:
+                x_columns[:] = [_gather_bits(column, positions, num_bits) for column in x_columns]
+                z_columns[:] = [_gather_bits(column, positions, num_bits) for column in z_columns]
+            self._nodes = [self._nodes[position] for position in positions]
+            self._ancestor_masks = [
+                _gather_bits(self._ancestor_masks[position], positions, num_bits)
+                for position in positions
+            ]
+        self._next_renumbering = 2 * len(self._nodes) + _RENUMBERING_SLACK
+
+    def _anticommuting(self, paulis: tuple[cirq.PauliString[cirq.Qid], ...]) -> int:
+        vertices = 0
+        for pauli in paulis:
+            for x_columns, z_columns in self._lanes:
+                anticommuting = 0
+                for qubit, pauli_gate in pauli.items():
+                    index = self._qubit_indices[qubit]
+                    if pauli_gate != cirq.X:
+                        anticommuting ^= x_columns[index]
+                    if pauli_gate != cirq.Z:
+                        anticommuting ^= z_columns[index]
+                vertices |= anticommuting
+        return vertices
+
+    def _local_forward_sources_for(self, operation: cirq.Operation) -> tuple[tuple[int, ...], ...]:
+        gate = _require_gate_operation(operation).gate
+        if gate not in self._local_forward_sources:
+            self._local_forward_sources[gate] = _local_forward_sources(gate, len(operation.qubits))
+        return self._local_forward_sources[gate]
+
+
+def _local_forward_sources(gate: cirq.Gate, num_qubits: int) -> tuple[tuple[int, ...], ...]:
+    """Old local X then Z columns XORed into each new one when propagating forward across `gate`.
+
+    Propagating forward inverts pulling back. Clifford conjugation is symplectic, so the inverse
+    of the pulled-back images `B` is `Ω Bᵀ Ω`, where `Ω` swaps X and Z: new column `a` is the
+    XOR of the old columns at the swapped positions of the pulled-back image of generator `Ω a`.
+    Returns an empty tuple when propagation does nothing, as for Paulis and measurements.
+    """
+    images = _local_pull_back_images(gate, num_qubits)
+    swapped = [*range(num_qubits, 2 * num_qubits), *range(num_qubits)]
+    sources = tuple(
+        tuple(swapped[bit] for bit in range(2 * num_qubits) if images[swapped[position]] >> bit & 1)
+        for position in range(2 * num_qubits)
+    )
+    if all(position_sources == (position,) for position, position_sources in enumerate(sources)):
+        return ()
+    return sources
+
+
+def _bit_positions(bits: int, num_bits: int) -> npt.NDArray[np.intp]:
+    """Increasing positions of the set bits of `bits`, which is below `2**num_bits`."""
+    return np.flatnonzero(_unpack_bits(bits, num_bits))
+
+
+def _gather_bits(bits: int, positions: npt.NDArray[np.intp], num_bits: int) -> int:
+    """Bitset whose bit `i` is bit `positions[i]` of `bits`, which is below `2**num_bits`."""
+    gathered = np.packbits(_unpack_bits(bits, num_bits)[positions], bitorder="little")
+    return int.from_bytes(gathered.tobytes(), "little")
+
+
+def _unpack_bits(bits: int, num_bits: int) -> npt.NDArray[np.uint8]:
+    """Little-endian bits of `bits`, which is below `2**num_bits`, one per array entry."""
+    return np.unpackbits(
+        np.frombuffer(bits.to_bytes((num_bits + 7) // 8, "little"), dtype=np.uint8),
+        bitorder="little",
+    )
 
 
 class ReactionDepthEstimator:
@@ -445,19 +618,33 @@ class ReactionDepthEstimator:
         """
         operations = tuple(circuit.all_operations())
         reaction_tree = nx.DiGraph(operations=operations)
-        factory_nodes: dict[int, tuple[ReactionTreeNode, ...]] = {}
-        packed_dynamics: dict[ReactionTreeNode, _PackedReactionDynamics] = {}
-        frame = _CliffordFrame(circuit.all_qubits())
+        frames = _ReactionFrames(circuit.all_qubits())
         for operation_index, operation in enumerate(operations):
-            self._add_reaction_node(
-                operation_index,
-                operation,
-                frame,
-                reaction_tree,
-                factory_nodes,
-                packed_dynamics,
-            )
-        self._add_reaction_edges(frame, reaction_tree, factory_nodes, packed_dynamics)
+            factory_dynamics = self._factory_dynamics(operation)
+            if factory_dynamics is None:
+                frames.apply(operation)
+                continue
+
+            # Vertices of one operation never depend on each other, so their outputs are only
+            # tracked once all of them have their parents.
+            ancestor_masks: list[int] = []
+            for vertex_index, reaction_dynamics in enumerate(factory_dynamics):
+                node = (operation_index, vertex_index)
+                reaction_tree.add_node(
+                    node,
+                    dependency_paulis=reaction_dynamics.dependency_paulis,
+                    outputs=reaction_dynamics.outputs,
+                )
+                parents, ancestor_mask = frames.reduced_parents(reaction_dynamics.dependency_paulis)
+                reaction_tree.add_edges_from((parent, node) for parent in parents)
+                ancestor_masks.append(ancestor_mask)
+            for vertex_index, (reaction_dynamics, ancestor_mask) in enumerate(
+                zip(factory_dynamics, ancestor_masks, strict=True)
+            ):
+                frames.add(
+                    (operation_index, vertex_index), reaction_dynamics.outputs, ancestor_mask
+                )
+            frames.renumber_if_sparse()
 
         for depth, nodes in enumerate(nx.topological_generations(reaction_tree), start=1):
             for node in nodes:
@@ -489,79 +676,3 @@ class ReactionDepthEstimator:
                 (operation.gate, self.factories[operation.gate])
             ]
         )
-
-    def _add_reaction_node(
-        self,
-        operation_index: int,
-        operation: cirq.Operation,
-        frame: _CliffordFrame,
-        reaction_tree: nx.DiGraph,
-        factory_nodes: dict[int, tuple[ReactionTreeNode, ...]],
-        packed_dynamics: dict[ReactionTreeNode, _PackedReactionDynamics],
-    ) -> None:
-        factory_dynamics = self._factory_dynamics(operation)
-        if factory_dynamics is None:
-            frame.apply(operation)
-            return
-
-        nodes: list[ReactionTreeNode] = []
-        for vertex_index, reaction_dynamics in enumerate(factory_dynamics):
-            node = (operation_index, vertex_index)
-            nodes.append(node)
-            reaction_tree.add_node(
-                node,
-                dependency_paulis=reaction_dynamics.dependency_paulis,
-                outputs=reaction_dynamics.outputs,
-            )
-            packed_dynamics[node] = _PackedReactionDynamics(
-                tuple(frame.pull_back(pauli) for pauli in reaction_dynamics.dependency_paulis),
-                tuple(frame.pull_back(output) for output in reaction_dynamics.outputs),
-            )
-        factory_nodes[operation_index] = tuple(nodes)
-
-    def _add_reaction_edges(
-        self,
-        frame: _CliffordFrame,
-        reaction_tree: nx.DiGraph,
-        factory_nodes: dict[int, tuple[ReactionTreeNode, ...]],
-        packed_dynamics: dict[ReactionTreeNode, _PackedReactionDynamics],
-    ) -> None:
-        node_masks = {node: 1 << index for index, node in enumerate(reaction_tree)}
-        operation_masks = {
-            operation_index: sum(node_masks[node] for node in nodes)
-            for operation_index, nodes in factory_nodes.items()
-        }
-        factory_operation_indices = tuple(factory_nodes)
-        closure_masks: dict[ReactionTreeNode, int] = {}
-        future_mask = 0
-
-        for source_position in reversed(range(len(factory_operation_indices))):
-            source_operation_index = factory_operation_indices[source_position]
-            for source_node in factory_nodes[source_operation_index]:
-                covered_mask = 0
-                outputs = packed_dynamics[source_node].outputs
-                search_mask = future_mask if outputs else 0
-                for target_operation_index in factory_operation_indices[source_position + 1 :]:
-                    if covered_mask == search_mask:
-                        break
-
-                    operation_mask = operation_masks[target_operation_index]
-                    if covered_mask & operation_mask == operation_mask:
-                        continue
-
-                    for target_node in factory_nodes[target_operation_index]:
-                        target_mask = node_masks[target_node]
-                        if covered_mask & target_mask:
-                            continue
-                        dependency_paulis = packed_dynamics[target_node].dependency_paulis
-                        if any(
-                            frame.anticommutes(output, dependency_pauli)
-                            for output in outputs
-                            for dependency_pauli in dependency_paulis
-                        ):
-                            reaction_tree.add_edge(source_node, target_node)
-                            covered_mask |= closure_masks[target_node]
-
-                closure_masks[source_node] = node_masks[source_node] | covered_mask
-
-            future_mask |= operation_masks[source_operation_index]

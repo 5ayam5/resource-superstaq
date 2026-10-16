@@ -972,3 +972,60 @@ def test_reaction_depth_treats_measurement_as_identity_propagation() -> None:
 
     assert set(reaction_tree.edges) == {((0, 0), (4, 0))}
     assert reaction_depth_estimator.reaction_depth(circuit) == 2
+
+
+@pytest.mark.parametrize(
+    ("circuit", "expected_edges", "expected_depth"),
+    [
+        # The last H turns the first T's output back into Z, which commutes with the last T.
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.H(Q0), cirq.T(Q0), cirq.H(Q0), cirq.T(Q0)),
+            {((0, 0), (2, 0)), ((2, 0), (4, 0))},
+            3,
+            id="chain",
+        ),
+        # Both later T gates depend on the first one, but their own Z outputs commute.
+        pytest.param(
+            cirq.Circuit(cirq.T(Q0), cirq.H(Q0), cirq.T(Q0), cirq.T(Q0)),
+            {((0, 0), (2, 0)), ((0, 0), (3, 0))},
+            2,
+            id="fan-out",
+        ),
+    ],
+)
+def test_reaction_tree_follows_non_transitive_dependencies(
+    circuit: cirq.Circuit,
+    expected_edges: set[tuple[est.ReactionTreeNode, est.ReactionTreeNode]],
+    expected_depth: int,
+) -> None:
+    reaction_depth_estimator = est.ReactionDepthEstimator()
+
+    reaction_tree = reaction_depth_estimator.reaction_tree(circuit)
+
+    assert set(reaction_tree.edges) == expected_edges
+    assert reaction_depth_estimator.reaction_depth(circuit) == expected_depth
+
+
+def test_reaction_tree_keeps_long_lived_vertices_while_dropping_finished_ones() -> None:
+    # Every chain T only depends on the previous one, so older chain vertices stop being tracked
+    # and are renumbered away, while the first T(q1) stays tracked until the last T(q1) needs it.
+    q0, q1 = cirq.LineQubit.range(2)
+    num_chain_t_gates = 300
+    reaction_depth_estimator = est.ReactionDepthEstimator()
+    circuit = cirq.Circuit(
+        cirq.T(q1),
+        *(op for _ in range(num_chain_t_gates) for op in (cirq.T(q0), cirq.H(q0))),
+        cirq.H(q1),
+        cirq.T(q1),
+        strategy=cirq.InsertStrategy.NEW,
+    )
+    last_operation_index = 2 * num_chain_t_gates + 2
+
+    reaction_tree = reaction_depth_estimator.reaction_tree(circuit)
+
+    assert set(reaction_tree.edges) == {
+        ((2 * index + 1, 0), (2 * index + 3, 0)) for index in range(num_chain_t_gates - 1)
+    } | {((0, 0), (last_operation_index, 0))}
+    assert reaction_tree.nodes[(2 * num_chain_t_gates - 1, 0)]["depth"] == num_chain_t_gates
+    assert reaction_tree.nodes[(last_operation_index, 0)]["depth"] == 2
+    assert reaction_depth_estimator.reaction_depth(circuit) == num_chain_t_gates
