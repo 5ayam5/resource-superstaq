@@ -16,7 +16,7 @@ from __future__ import annotations
 import collections
 import typing
 import warnings
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
 import cirq
@@ -580,8 +580,7 @@ class ReactionDepthEstimator:
         depth_spans = _DepthSpans(frame)
         reaction_depth = 0
 
-        for operation in circuit.all_operations():
-            factory_dynamics = self._factory_dynamics(operation)
+        for operation, factory_dynamics in self._operation_dynamics(circuit.all_operations()):
             if factory_dynamics is None:
                 frame.apply(operation)
                 continue
@@ -619,8 +618,9 @@ class ReactionDepthEstimator:
         operations = tuple(circuit.all_operations())
         reaction_tree = nx.DiGraph(operations=operations)
         frames = _ReactionFrames(circuit.all_qubits())
-        for operation_index, operation in enumerate(operations):
-            factory_dynamics = self._factory_dynamics(operation)
+        for operation_index, (operation, factory_dynamics) in enumerate(
+            self._operation_dynamics(operations)
+        ):
             if factory_dynamics is None:
                 frames.apply(operation)
                 continue
@@ -651,6 +651,24 @@ class ReactionDepthEstimator:
                 reaction_tree.nodes[node]["depth"] = depth
 
         return reaction_tree
+
+    def _operation_dynamics(
+        self, operations: Iterable[cirq.Operation]
+    ) -> Iterator[tuple[cirq.GateOperation, tuple[ReactionDynamics[cirq.Qid], ...] | None]]:
+        """Pair each operation with its factory dynamics, or `None` for a Clifford operation.
+
+        The dynamics only depend on the gate and its qubits, which repeat throughout a circuit,
+        so each pair is only checked and localized once.
+        """
+        cache: dict[
+            tuple[cirq.Gate, tuple[cirq.Qid, ...]], tuple[ReactionDynamics[cirq.Qid], ...] | None
+        ] = {}
+        for operation in operations:
+            operation = _require_gate_operation(operation)
+            key = (operation.gate, operation.qubits)
+            if key not in cache:
+                cache[key] = self._factory_dynamics(operation)
+            yield operation, cache[key]
 
     def _factory_dynamics(
         self, operation: cirq.Operation
